@@ -1,0 +1,9 @@
+<resources>
+    <!-- Plain platform theme: black on white, no animations (e-ink friendly). -->
+    <style name="Theme.Reader" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/white</item>
+        <item name="android:colorPrimary">@color/black</item>
+        <item name="android:colorAccent">@color/black</item>
+        <item name="android:windowAnimationStyle">@null</item>
+    </style>
+</resources>
