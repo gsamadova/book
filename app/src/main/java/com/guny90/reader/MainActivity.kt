@@ -9,10 +9,13 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.provider.OpenableColumns
 import android.util.TypedValue
 import android.view.KeyEvent
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
+import com.guny90.reader.dict.DefinitionText
+import com.guny90.reader.dict.Dictionaries
 import java.io.File
 import java.util.concurrent.Executors
 
@@ -23,11 +26,14 @@ import java.util.concurrent.Executors
 class MainActivity : Activity() {
 
     private val worker = Executors.newSingleThreadExecutor()
+    /** Separate thread so a lookup never waits behind a chapter load. */
+    private val dictWorker = Executors.newSingleThreadExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
     private lateinit var prefs: SharedPreferences
     private lateinit var pageView: PageView
 
     private val bookFile by lazy { File(filesDir, "current.epub") }
+    private val dictionaries by lazy { Dictionaries(File(filesDir, "dicts")) }
 
     // UI-thread state
     private var book: EpubBook? = null
@@ -42,6 +48,9 @@ class MainActivity : Activity() {
     private var jobId = 0
     private var laidOutW = 0
     private var laidOutH = 0
+    private var popup: LookupPopup? = null
+    private var lookupId = 0
+    private var popupDict: Dictionaries.Info? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -66,6 +75,7 @@ class MainActivity : Activity() {
             }
         }
         pageView.onTextAreaLaidOut = ::onTextAreaLaidOut
+        pageView.onWordLongPress = ::onWordLongPress
 
         val uri = intent?.data
         if (uri != null && savedInstanceState == null) openUri(uri) else restoreLastBook()
@@ -80,6 +90,8 @@ class MainActivity : Activity() {
         val b = book
         worker.execute { b?.close() }
         worker.shutdown()
+        dictWorker.execute { dictionaries.closeAll() }
+        dictWorker.shutdown()
         super.onDestroy()
     }
 
@@ -107,7 +119,16 @@ class MainActivity : Activity() {
     @Deprecated("Plain Activity API; fine for this minimal app")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode == REQUEST_OPEN && resultCode == RESULT_OK) data?.data?.let { openUri(it) }
+        if (resultCode != RESULT_OK || data == null) return
+        when (requestCode) {
+            REQUEST_OPEN -> data.data?.let { openUri(it) }
+            REQUEST_DICTIONARY -> {
+                val clip = data.clipData
+                val uris = if (clip != null) (0 until clip.itemCount).map { clip.getItemAt(it).uri }
+                else listOfNotNull(data.data)
+                if (uris.isNotEmpty()) installDictionaries(uris)
+            }
+        }
     }
 
     /** Copies the chosen file into private storage so it can be reopened later without permissions. */
@@ -276,6 +297,7 @@ class MainActivity : Activity() {
         val b = book
         val actions = ArrayList<Pair<String, () -> Unit>>()
         actions += "Open book…" to ::pickBook
+        actions += "Dictionaries" to ::showDictionaries
         if (b != null) {
             actions += "Contents" to ::showContents
             actions += "Larger text (${fontSp + 2})" to { changeFont(+2) }
@@ -292,16 +314,207 @@ class MainActivity : Activity() {
         showList("Contents", entries.map { it.title }) { loadChapter(entries[it].spineIndex, 0) }
     }
 
-    private fun showList(title: String, items: List<String>, onPick: (Int) -> Unit) {
-        val dialog = AlertDialog.Builder(this)
+    private fun showList(title: String, items: List<String>, onCancel: (() -> Unit)? = null, onPick: (Int) -> Unit) {
+        val builder = AlertDialog.Builder(this)
             .setTitle(title)
             .setItems(items.toTypedArray()) { _, which -> onPick(which) }
-            .create()
+        if (onCancel != null) builder.setOnCancelListener { onCancel() }
+        showPlain(builder)
+    }
+
+    /** Shows a dialog without animation or gray dimming (each costs an extra e-ink refresh). */
+    private fun showPlain(builder: AlertDialog.Builder): AlertDialog {
+        val dialog = builder.create()
         dialog.window?.apply {
             setWindowAnimations(0)
-            clearFlags(android.view.WindowManager.LayoutParams.FLAG_DIM_BEHIND) // gray dim = extra e-ink refresh
+            clearFlags(android.view.WindowManager.LayoutParams.FLAG_DIM_BEHIND)
         }
         dialog.show()
+        return dialog
+    }
+
+    private fun showMessage(title: String, message: String) {
+        showPlain(AlertDialog.Builder(this).setTitle(title).setMessage(message).setPositiveButton("OK", null))
+    }
+
+    // ---------------------------------------------------------------- dictionaries
+
+    private fun showDictionaries() {
+        val dicts = dictionaries.list()
+        val builder = AlertDialog.Builder(this)
+            .setTitle(if (dicts.isEmpty()) "Dictionaries" else "Dictionaries (tap to remove)")
+            .setPositiveButton("Add…") { _, _ -> pickDictionary() }
+            .setNegativeButton("Close", null)
+        if (dicts.isEmpty()) {
+            builder.setMessage(
+                "No dictionaries yet.\n\nTap Add… and select the StarDict files together " +
+                    "(.ifo, .idx and .dict or .dict.dz), or one .zip / .tar.gz archive."
+            )
+        } else {
+            builder.setItems(dicts.map { "${it.name}  (${it.words} words)" }.toTypedArray()) { _, i ->
+                confirmRemove(dicts[i])
+            }
+        }
+        showPlain(builder)
+    }
+
+    private fun confirmRemove(dict: Dictionaries.Info) {
+        showPlain(
+            AlertDialog.Builder(this)
+                .setTitle("Remove dictionary?")
+                .setMessage(dict.name)
+                .setPositiveButton("Remove") { _, _ ->
+                    dictWorker.execute {
+                        dictionaries.remove(dict.id)
+                        mainHandler.post(::showDictionaries)
+                    }
+                }
+                .setNegativeButton("Cancel", null)
+        )
+    }
+
+    private fun pickDictionary() {
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT)
+            .addCategory(Intent.CATEGORY_OPENABLE)
+            .setType("*/*")
+            .putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+        try {
+            startActivityForResult(intent, REQUEST_DICTIONARY)
+        } catch (e: ActivityNotFoundException) {
+            try {
+                startActivityForResult(
+                    Intent(Intent.ACTION_GET_CONTENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*")
+                        .putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true),
+                    REQUEST_DICTIONARY,
+                )
+            } catch (e2: ActivityNotFoundException) {
+                showMessage("Dictionaries", "No file picker found on this device.")
+            }
+        }
+    }
+
+    private fun installDictionaries(uris: List<Uri>) {
+        val busy = showPlain(AlertDialog.Builder(this).setMessage("Adding dictionary…").setCancelable(false))
+        dictWorker.execute {
+            val temp = File(cacheDir, "dict-import")
+            val (title, message) = try {
+                temp.deleteRecursively()
+                temp.mkdirs()
+                val files = uris.mapIndexed { i, uri ->
+                    val name = displayName(uri) ?: "file$i"
+                    val copy = File(temp, "$i-${name.substringAfterLast('/')}")
+                    val input = contentResolver.openInputStream(uri) ?: error("Cannot read $name")
+                    input.use { inp -> copy.outputStream().use { inp.copyTo(it, 64 * 1024) } }
+                    name to copy
+                }
+                val names = dictionaries.install(files)
+                "Dictionary added" to names.joinToString("\n")
+            } catch (e: Dictionaries.UserError) {
+                "Could not add dictionary" to (e.message ?: "")
+            } catch (e: Exception) {
+                "Could not add dictionary" to (e.message ?: e.javaClass.simpleName)
+            } finally {
+                temp.deleteRecursively()
+            }
+            mainHandler.post {
+                busy.dismiss()
+                showMessage(title, message)
+            }
+        }
+    }
+
+    private fun displayName(uri: Uri): String? = try {
+        contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+            if (c.moveToFirst()) c.getString(0) else null
+        }
+    } catch (e: Exception) {
+        null
+    } ?: uri.lastPathSegment?.substringAfterLast('/')
+
+    private val dictPrefKey get() = bookKey.replaceFirst("pos_", "dict_")
+
+    /** Long-press flow: pick the book's dictionary (asking once if there are several), then look up. */
+    private fun onWordLongPress(word: String, centerY: Int) {
+        val dicts = dictionaries.list()
+        if (dicts.isEmpty()) {
+            pageView.clearSelection()
+            showPlain(
+                AlertDialog.Builder(this)
+                    .setTitle("No dictionary")
+                    .setMessage("Add a StarDict dictionary to look up words.")
+                    .setPositiveButton("Add…") { _, _ -> pickDictionary() }
+                    .setNegativeButton("Close", null)
+            )
+            return
+        }
+        val saved = prefs.getString(dictPrefKey, null)
+        val chosen = dicts.firstOrNull { it.id == saved } ?: dicts.singleOrNull()
+        if (chosen != null) {
+            lookUp(chosen, word, centerY)
+        } else {
+            chooseDictionary(dicts, onCancel = { pageView.clearSelection() }) { lookUp(it, word, centerY) }
+        }
+    }
+
+    private fun chooseDictionary(
+        dicts: List<Dictionaries.Info>,
+        onCancel: (() -> Unit)? = null,
+        onChosen: (Dictionaries.Info) -> Unit,
+    ) {
+        showList("Dictionary for this book", dicts.map { it.name }, onCancel) { i ->
+            prefs.edit().putString(dictPrefKey, dicts[i].id).apply()
+            onChosen(dicts[i])
+        }
+    }
+
+    private fun lookUp(dict: Dictionaries.Info, word: String, centerY: Int) {
+        val id = ++lookupId
+        dictWorker.execute {
+            val content = try {
+                val result = dictionaries.lookup(dict.id, word)
+                if (result.definitions.isNotEmpty()) {
+                    LookupPopup.Content(
+                        title = result.definitions.first().word,
+                        body = DefinitionText.format(result.definitions),
+                        dictName = result.dictName,
+                    )
+                } else {
+                    LookupPopup.Content(
+                        title = word,
+                        body = null,
+                        note = if (result.suggestions.isEmpty()) "Not found." else "Not found. Nearest entries:",
+                        suggestions = result.suggestions,
+                        dictName = result.dictName,
+                    )
+                }
+            } catch (e: Exception) {
+                LookupPopup.Content(word, null, note = "Dictionary error: ${e.message}", dictName = dict.name)
+            }
+            mainHandler.post { if (id == lookupId) showLookup(content, dict, word, centerY) }
+        }
+    }
+
+    private fun showLookup(content: LookupPopup.Content, dict: Dictionaries.Info, word: String, centerY: Int) {
+        popupDict = dict
+        val current = popup
+        if (current != null && current.isShowing) {
+            current.update(content)
+            return
+        }
+        val newPopup = LookupPopup(
+            this,
+            centerY,
+            onSuggestion = { suggestion -> lookUp(popupDict ?: dict, suggestion, centerY) },
+            onChangeDictionary = {
+                chooseDictionary(dictionaries.list()) { chosen -> lookUp(chosen, word, centerY) }
+            },
+            onDismiss = {
+                popup = null
+                pageView.clearSelection()
+            },
+        )
+        popup = newPopup
+        newPopup.show(content)
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
@@ -318,5 +531,6 @@ class MainActivity : Activity() {
 
     companion object {
         private const val REQUEST_OPEN = 1
+        private const val REQUEST_DICTIONARY = 2
     }
 }
