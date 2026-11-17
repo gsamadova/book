@@ -594,33 +594,55 @@ class MainActivity : Activity() {
 
     // ---------------------------------------------------------------- menu & keys
 
+    /**
+     * Main menu, most used first: getting around the book, then settings grouped in submenus
+     * (each item shows its current values), then sync, then opening another book.
+     */
     private fun showMenu() {
         val b = book
         val d = pdf
         val actions = ArrayList<Pair<String, () -> Unit>>()
-        actions += "Open book…" to ::pickBook
-        if (d != null) {
-            // Pages are pictures: no text settings, dictionary or reading aloud.
-            actions += "Go to page… (${pdfPage + 1} of ${d.pageCount})" to ::showGoToPage
-            actions += "Sync: ${if (positionSync.isEnabled) positionSync.username else "Off"}" to ::showSyncSettings
-            showList(d.title, actions.map { it.first }) { actions[it].second() }
-            return
-        }
-        actions += "Dictionaries" to ::showDictionaries
-        if (b != null) {
-            actions += "Contents" to ::showContents
-            actions += if (readingAloud) "Stop reading aloud" to ::stopReadingAloud
-            else "Read aloud" to ::startReadingAloud
-            actions += "Larger text (${fontSp + 2})" to { changeFont(+2) }
-            actions += "Smaller text (${fontSp - 2})" to { changeFont(-2) }
-            actions += "Paragraph spacing: ${Pages.PARAGRAPH_SPACINGS[paragraphSpacing].first}" to ::chooseParagraphSpacing
-            actions += "Pictures: ${if (showPictures) "On" else "Off"}" to ::togglePictures
-            actions += "One word: ${oneWordAction.label}" to ::chooseOneWordAction
-            actions += "Several words: ${severalWordsAction.label}" to ::chooseSeveralWordsAction
+        when {
+            d != null -> {
+                // Pages are pictures: no text settings, dictionary or reading aloud.
+                actions += "Go to page… (${pdfPage + 1} of ${d.pageCount})" to ::showGoToPage
+            }
+            b != null -> {
+                actions += "Contents" to ::showContents
+                actions += if (readingAloud) "Stop reading aloud" to ::stopReadingAloud
+                else "Read aloud" to ::startReadingAloud
+                actions += "Text: $fontSp · ${spacingName()} spacing · pictures ${onOff(showPictures)}" to ::showTextMenu
+                actions += "Words: ${oneWordAction.label} · ${severalWordsAction.label}" to ::showWordsMenu
+            }
+            else -> actions += "Dictionaries" to ::showDictionaries
         }
         actions += "Sync: ${if (positionSync.isEnabled) positionSync.username else "Off"}" to ::showSyncSettings
-        showList(b?.title ?: "Reader", actions.map { it.first }) { actions[it].second() }
+        actions += "Open book…" to ::pickBook
+        showList(d?.title ?: b?.title ?: "Reader", actions.map { it.first }) { actions[it].second() }
     }
+
+    /** Text size, spacing and pictures. Stays open after a quick change, so you can tap again. */
+    private fun showTextMenu() {
+        val actions = ArrayList<Pair<String, () -> Unit>>()
+        actions += "Larger text (${fontSp + 2})" to { changeFont(+2); showTextMenu() }
+        actions += "Smaller text (${fontSp - 2})" to { changeFont(-2); showTextMenu() }
+        actions += "Paragraph spacing: ${spacingName()}" to ::chooseParagraphSpacing
+        actions += "Pictures: ${if (showPictures) "On" else "Off"}" to { togglePictures(); showTextMenu() }
+        showList("Text", actions.map { it.first }) { actions[it].second() }
+    }
+
+    /** What selecting words does, and the dictionaries used for it. */
+    private fun showWordsMenu() {
+        val count = dictionaries.list().size
+        val actions = ArrayList<Pair<String, () -> Unit>>()
+        actions += "One word: ${oneWordAction.label}" to ::chooseOneWordAction
+        actions += "Several words: ${severalWordsAction.label}" to ::chooseSeveralWordsAction
+        actions += "Dictionaries (${if (count == 0) "none" else count})" to ::showDictionaries
+        showList("Words", actions.map { it.first }) { actions[it].second() }
+    }
+
+    private fun spacingName() = Pages.PARAGRAPH_SPACINGS[paragraphSpacing].first
+    private fun onOff(on: Boolean) = if (on) "on" else "off"
 
     private fun chooseParagraphSpacing() {
         val names = Pages.PARAGRAPH_SPACINGS.map { it.first }.toTypedArray()
