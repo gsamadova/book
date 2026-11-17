@@ -52,6 +52,8 @@ class MainActivity : Activity() {
     private val dictWorker = Executors.newSingleThreadExecutor()
     /** Network calls for position sync; never blocks reading. */
     private val syncWorker = Executors.newSingleThreadExecutor()
+    /** Reads the words of PDF pages (for selecting them) without delaying page rendering. */
+    private val wordsWorker = Executors.newSingleThreadExecutor()
     private val positionSync by lazy { PositionSync(prefs, deviceName()) }
     /** Book fingerprint (same on every device), used as the sync document id. */
     private var bookHash: String? = null
@@ -70,6 +72,10 @@ class MainActivity : Activity() {
     /** Open PDF (instead of [book]); its pages are shown as pictures. */
     private var pdf: PdfBook? = null
     private var pdfPage = 0
+    /** Reads the open PDF's words, page by page (used on [wordsWorker] only). */
+    private var pdfWords: PdfWords? = null
+    /** The page whose words are wanted; older requests are skipped (the reader moved on). */
+    @Volatile private var wantedWordsPage = -1
     private var bookKey = ""
     private var chapter = 0
     private var chapterText: CharSequence? = null
@@ -127,6 +133,7 @@ class MainActivity : Activity() {
         speechRate = prefs.getFloat("speech_rate", 1f)
         showPictures = prefs.getBoolean("pictures", true)
         volumeControlStream = AudioManager.STREAM_MUSIC
+        removeOldPdfText()
 
         pageView = PageView(this)
         controls = buildReadAloudBar()
@@ -156,6 +163,9 @@ class MainActivity : Activity() {
         pageView.onTextAreaLaidOut = ::onTextAreaLaidOut
         pageView.onTextSelected = ::onTextSelected
         pageView.onPictureLongPress = ::openPicture
+        pageView.onNoWords = {
+            Toast.makeText(this, "No text to select on this page (it may be a scanned picture).", Toast.LENGTH_SHORT).show()
+        }
 
         val uri = intent?.data
         if (uri != null && savedInstanceState == null) openUri(uri) else restoreLastBook()
@@ -181,11 +191,15 @@ class MainActivity : Activity() {
     override fun onDestroy() {
         val b = book
         val d = pdf
+        val words = pdfWords
         worker.execute {
             b?.close()
             d?.close()
         }
         worker.shutdown()
+        wantedWordsPage = -1
+        wordsWorker.execute { words?.close() }
+        wordsWorker.shutdown()
         dictWorker.execute { dictionaries.closeAll() }
         dictWorker.shutdown()
         syncWorker.shutdown() // lets a pending upload finish
@@ -309,17 +323,36 @@ class MainActivity : Activity() {
         pushPosition() // the book being replaced
         val oldBook = book
         val oldPdf = pdf
+        val oldWords = pdfWords
         book = null
         pdf = null
+        pdfWords = null
         if (oldBook != null || oldPdf != null) worker.execute {
             oldBook?.close()
             oldPdf?.close()
         }
+        if (oldWords != null) {
+            wantedWordsPage = -1
+            wordsWorker.execute { oldWords.close() }
+        }
+    }
+
+    /**
+     * Deletes what the removed PDF text view left behind: the cached text of a PDF, its
+     * per-book setting, and PdfBox temp files of an interrupted run.
+     */
+    private fun removeOldPdfText() {
+        File(filesDir, "current.pdftext").delete()
+        File(filesDir, "current.pdftext.tmp").delete()
+        val keys = prefs.all.keys.filter { it.startsWith("pdf_text_view_") }
+        if (keys.isNotEmpty()) prefs.edit().apply { keys.forEach { remove(it) } }.apply()
+        cacheDir.listFiles { f -> f.name.startsWith("PDFBox") }?.forEach { it.delete() }
     }
 
     private fun setPdf(newPdf: PdfBook, hash: String) {
         closeCurrentBook()
         pdf = newPdf
+        pdfWords = PdfWords(applicationContext, pdfFile)
         showTitleInRecents(newPdf.title)
         bookKey = "pos_" + (newPdf.title + "|" + pdfFile.length()).hashCode()
         chapterText = null
@@ -491,9 +524,10 @@ class MainActivity : Activity() {
             mainHandler.post {
                 if (id != jobId || pdf !== d) return@post
                 loading = false
-                val bitmap = result.getOrNull()
-                if (bitmap != null) {
-                    pageView.showImage(bitmap, d.title, "${target + 1}/${d.pageCount}")
+                val rendered = result.getOrNull()
+                if (rendered != null) {
+                    pageView.showImage(rendered, d.title, "${target + 1}/${d.pageCount}")
+                    loadWords(target)
                 } else {
                     val e = result.exceptionOrNull()
                     pageView.showMessage("Could not show page ${target + 1}.\n${e?.message ?: e?.javaClass?.simpleName ?: ""}")
@@ -507,6 +541,20 @@ class MainActivity : Activity() {
             if (target + 1 < d.pageCount && id == jobId) {
                 try { d.page(target + 1, w, h) } catch (e: Throwable) { } // shown later, or the error then
             }
+        }
+    }
+
+    /**
+     * Reads the words of the PDF page being shown, in the background while it's read, so a
+     * long-press can select them. Pages left before their turn came are skipped.
+     */
+    private fun loadWords(page: Int) {
+        val source = pdfWords ?: return
+        wantedWordsPage = page
+        wordsWorker.execute {
+            if (wantedWordsPage != page) return@execute
+            val words = try { source.page(page) } catch (e: Throwable) { emptyList() } // incl. OutOfMemoryError
+            mainHandler.post { if (pdfWords === source) pageView.setWords(page, words) }
         }
     }
 
@@ -604,8 +652,9 @@ class MainActivity : Activity() {
         val actions = ArrayList<Pair<String, () -> Unit>>()
         when {
             d != null -> {
-                // Pages are pictures: no text settings, dictionary or reading aloud.
+                // Pages are pictures: no text settings or reading aloud, but words can be selected.
                 actions += "Go to page… (${pdfPage + 1} of ${d.pageCount})" to ::showGoToPage
+                actions += "Words: ${oneWordAction.label} · ${severalWordsAction.label}" to ::showWordsMenu
             }
             b != null -> {
                 actions += "Contents" to ::showContents

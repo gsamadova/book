@@ -186,6 +186,8 @@ class PageView(context: Context) : View(context) {
     var onTextSelected: ((text: String, singleWord: Boolean, centerY: Int) -> Unit)? = null
     /** Long-press on a picture (instead of selecting text). */
     var onPictureLongPress: ((PictureSpan) -> Unit)? = null
+    /** Long-press on a PDF page that has no words to select (e.g. a scanned page). */
+    var onNoWords: (() -> Unit)? = null
     /** Called after layout; the activity re-paginates if the text area size changed. */
     var onTextAreaLaidOut: (() -> Unit)? = null
 
@@ -195,7 +197,12 @@ class PageView(context: Context) : View(context) {
     private var statusRight = ""
     private var message: String? = null
     /** A page shown as a picture (PDF), instead of laid-out text. */
-    private var image: Bitmap? = null
+    private var image: PdfBook.Rendered? = null
+    /** The words of the PDF page shown, once read (null until then); positions in PDF points. */
+    private var words: List<PageWords.Word>? = null
+    /**
+     * Selected text: character offsets of the chapter, or for a PDF page, indexes into [words].
+     */
     private var selection: IntRange? = null
     /** The sentence being read aloud (chapter offsets), underlined. */
     private var spoken: IntRange? = null
@@ -234,8 +241,17 @@ class PageView(context: Context) : View(context) {
     private var longPressed = false
     private var selecting = false
     private var anchor: IntRange? = null // the long-pressed word; the selection always includes it
+    private var lastX = 0f
+    private var lastY = 0f
+    /** Long-pressed a PDF page before its words were read: select when they arrive. */
+    private var waitingForWords = false
     private val longPressAction = Runnable {
         longPressed = true
+        if (image != null) {
+            val w = words
+            if (w == null) waitingForWords = true else startOnPdfPage(w)
+            return@Runnable
+        }
         val picture = pictureAt(downX, downY)
         if (picture != null) onPictureLongPress?.invoke(picture)
         else selecting = startSelection(downX, downY)
@@ -262,11 +278,12 @@ class PageView(context: Context) : View(context) {
         invalidate()
     }
 
-    /** A page that is a picture: tap zones work as usual; there is no text to select. */
-    fun showImage(bitmap: Bitmap, statusLeft: String, statusRight: String) {
+    /** A PDF page as a picture: tap zones work as usual; words can be selected once [setWords] gives them. */
+    fun showImage(rendered: PdfBook.Rendered, statusLeft: String, statusRight: String) {
         pages = null
         message = null
-        image = bitmap
+        if (image?.page != rendered.page) words = null
+        image = rendered
         selection = null
         spoken = null
         this.statusLeft = statusLeft
@@ -274,9 +291,20 @@ class PageView(context: Context) : View(context) {
         invalidate()
     }
 
+    /** The words of PDF page [page], for selecting them; ignored if another page is shown by now. */
+    fun setWords(page: Int, pageWords: List<PageWords.Word>) {
+        if (image?.page != page) return
+        words = pageWords
+        if (waitingForWords) {
+            waitingForWords = false
+            if (pressing || longPressed) startOnPdfPage(pageWords, lastX, lastY)
+        }
+    }
+
     fun showMessage(text: String) {
         pages = null
         image = null
+        words = null
         message = text
         selection = null
         invalidate()
@@ -302,11 +330,12 @@ class PageView(context: Context) : View(context) {
     }
 
     override fun onDraw(canvas: Canvas) {
-        val bmp = image
-        if (bmp != null) {
-            val left = paddingLeft + imageMargin + (imageWidth - bmp.width) / 2f
-            val top = paddingTop + imageMargin + (imageHeight - bmp.height) / 2f
-            canvas.drawBitmap(bmp, left, top, PictureSpan.picturePaint)
+        val img = image
+        if (img != null) {
+            canvas.drawBitmap(img.bitmap, imageLeft(img), imageTop(img), PictureSpan.picturePaint)
+            val w = words
+            val sel = selection
+            if (w != null && sel != null) drawPdfSelection(canvas, img, w, sel)
             drawStatus(canvas)
             return
         }
@@ -338,6 +367,83 @@ class PageView(context: Context) : View(context) {
         )
         canvas.drawText(title, 0, title.length, left, baseline, statusPaint)
         canvas.drawText(statusRight, right - rightWidth, baseline, statusPaint)
+    }
+
+    private fun imageLeft(img: PdfBook.Rendered) = paddingLeft + imageMargin + (imageWidth - img.bitmap.width) / 2f
+    private fun imageTop(img: PdfBook.Rendered) = paddingTop + imageMargin + (imageHeight - img.bitmap.height) / 2f
+    private fun screenX(img: PdfBook.Rendered, x: Float) = imageLeft(img) + (x - img.box.left) * img.scale
+    private fun screenY(img: PdfBook.Rendered, y: Float) = imageTop(img) + (y - img.box.top) * img.scale
+    private fun pageX(img: PdfBook.Rendered, x: Float) = img.box.left + (x - imageLeft(img)) / img.scale
+    private fun pageY(img: PdfBook.Rendered, y: Float) = img.box.top + (y - imageTop(img)) / img.scale
+
+    /** One outline box per line of the selected words, as for text. */
+    private fun drawPdfSelection(canvas: Canvas, img: PdfBook.Rendered, w: List<PageWords.Word>, sel: IntRange) {
+        val pad = selectionPaint.strokeWidth
+        var i = sel.first
+        while (i <= sel.last) {
+            val line = w[i].line
+            var left = w[i].left
+            var top = w[i].top
+            var right = w[i].right
+            var bottom = w[i].bottom
+            while (i + 1 <= sel.last && w[i + 1].line == line) {
+                i++
+                left = minOf(left, w[i].left)
+                top = minOf(top, w[i].top)
+                right = maxOf(right, w[i].right)
+                bottom = maxOf(bottom, w[i].bottom)
+            }
+            canvas.drawRect(
+                screenX(img, left) - pad, screenY(img, top) - pad,
+                screenX(img, right) + pad, screenY(img, bottom) + pad,
+                selectionPaint,
+            )
+            i++
+        }
+    }
+
+    /** Long-press on a PDF page: select the word under the finger, or say the page has no words. */
+    private fun startOnPdfPage(w: List<PageWords.Word>, x: Float = downX, y: Float = downY) {
+        val img = image ?: return
+        if (w.isEmpty()) {
+            onNoWords?.invoke()
+            return
+        }
+        val slop = 8 * density / img.scale // a little forgiving: fingers are wider than letters
+        val index = PageWords.wordAt(w, pageX(img, x), pageY(img, y), slop) ?: return
+        anchor = index..index
+        selection = index..index
+        selecting = true
+        invalidate()
+    }
+
+    private fun extendPdfSelectionTo(x: Float, y: Float) {
+        val img = image ?: return
+        val w = words ?: return
+        val a = anchor ?: return
+        val index = PageWords.nearest(w, pageX(img, x), pageY(img, y)) ?: return
+        val range = minOf(a.first, index)..maxOf(a.last, index)
+        if (range != selection) { // redraw only on change: every redraw costs an e-ink refresh
+            selection = range
+            invalidate()
+        }
+    }
+
+    private fun finishPdfSelection() {
+        val img = image ?: return
+        val w = words ?: return
+        val sel = selection ?: return
+        val selected = PageWords.join(w, sel)
+            .replace('\u2019', '\'')
+            .trim { !it.isLetterOrDigit() } // punctuation around the words: "copying." -> "copying"
+        if (selected.isEmpty()) {
+            clearSelection()
+            return
+        }
+        val top = sel.minOf { w[it].top }
+        val bottom = sel.maxOf { w[it].bottom }
+        val centerY = ((screenY(img, top) + screenY(img, bottom)) / 2).toInt()
+        onTextSelected?.invoke(selected, !selected.contains(' '), centerY)
     }
 
     /** One outline box per line, from the first to the last selected letter (no gray fill). */
@@ -396,14 +502,19 @@ class PageView(context: Context) : View(context) {
             MotionEvent.ACTION_DOWN -> {
                 downX = event.x
                 downY = event.y
+                lastX = event.x
+                lastY = event.y
+                waitingForWords = false
                 pressing = true
                 longPressed = false
                 selecting = false
                 postDelayed(longPressAction, longPressTimeout)
             }
             MotionEvent.ACTION_MOVE -> {
+                lastX = event.x
+                lastY = event.y
                 if (selecting) {
-                    extendSelectionTo(event.x, event.y)
+                    if (image != null) extendPdfSelectionTo(event.x, event.y) else extendSelectionTo(event.x, event.y)
                 } else if (pressing && Math.hypot((event.x - downX).toDouble(), (event.y - downY).toDouble()) > touchSlop) {
                     pressing = false
                     removeCallbacks(longPressAction)
@@ -411,9 +522,10 @@ class PageView(context: Context) : View(context) {
             }
             MotionEvent.ACTION_UP -> {
                 removeCallbacks(longPressAction)
+                waitingForWords = false
                 if (selecting) {
                     selecting = false
-                    finishSelection()
+                    if (image != null) finishPdfSelection() else finishSelection()
                 } else if (pressing && !longPressed) {
                     val zone = when {
                         event.x < width / 3f -> Zone.PREV
@@ -426,6 +538,7 @@ class PageView(context: Context) : View(context) {
             }
             MotionEvent.ACTION_CANCEL -> {
                 removeCallbacks(longPressAction)
+                waitingForWords = false
                 pressing = false
                 if (selecting) {
                     selecting = false

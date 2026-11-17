@@ -19,3 +19,8 @@
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
+# BouncyCastle is excluded from PdfBox (only needed for certificate-encrypted PDFs).
+-dontwarn org.bouncycastle.**
+
+# Optional JPEG 2000 decoder; PdfBox only needs it to draw images, which this app doesn't do.
+-dontwarn com.gemalto.jp2.**

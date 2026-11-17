@@ -23,30 +23,36 @@ class PdfBook private constructor(
 ) : Closeable {
     val pageCount: Int = renderer.pageCount
 
+    /**
+     * A rendered page: [bitmap] shows the area [box] of the page (PDF points from its top-left),
+     * scaled by [scale] pixels per point. Maps word positions onto the picture.
+     */
+    class Rendered(val page: Int, val bitmap: Bitmap, val box: RectF, val scale: Float)
+
     /** Content box of each page, in PDF points (found once per page). */
     private val contentBounds = HashMap<Int, RectF>()
 
     /** Recently rendered pages (current and neighbours) at [cacheWidth] x [cacheHeight]. */
-    private val cache = LinkedHashMap<Int, Bitmap>()
+    private val cache = LinkedHashMap<Int, Rendered>()
     private var cacheWidth = 0
     private var cacheHeight = 0
 
     /** Page [index] cropped to its content and scaled to fit [maxWidth] x [maxHeight]. */
-    fun page(index: Int, maxWidth: Int, maxHeight: Int): Bitmap {
+    fun page(index: Int, maxWidth: Int, maxHeight: Int): Rendered {
         if (maxWidth != cacheWidth || maxHeight != cacheHeight) {
             cache.clear()
             cacheWidth = maxWidth
             cacheHeight = maxHeight
         }
         cache.remove(index)?.let { cache[index] = it; return it } // re-insert: most recent last
-        val bitmap = render(index, maxWidth, maxHeight)
-        cache[index] = bitmap
+        val rendered = render(index, maxWidth, maxHeight)
+        cache[index] = rendered
         // Not recycled: the evicted page may still be on screen; the GC frees it.
         while (cache.size > CACHED_PAGES) cache.remove(cache.keys.first())
-        return bitmap
+        return rendered
     }
 
-    private fun render(index: Int, maxWidth: Int, maxHeight: Int): Bitmap {
+    private fun render(index: Int, maxWidth: Int, maxHeight: Int): Rendered {
         val page = renderer.openPage(index)
         try {
             val box = contentBounds.getOrPut(index) { findContent(page) }
@@ -60,7 +66,7 @@ class PdfBook private constructor(
                 postScale(scale, scale)
             }
             page.render(bitmap, null, matrix, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
-            return bitmap
+            return Rendered(index, bitmap, RectF(box), scale)
         } finally {
             page.close()
         }

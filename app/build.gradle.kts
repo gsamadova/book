@@ -22,7 +22,12 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            // R8 strips the unused parts of PdfBox: a much smaller APK.
+            isMinifyEnabled = true
+            isShrinkResources = true
+            // Same key as debug builds, so a release APK installs over a debug one, keeping
+            // books, positions and settings. Fine for a personal app that isn't published.
+            signingConfig = signingConfigs.getByName("debug")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -37,6 +42,9 @@ android {
 
 dependencies {
     implementation(libs.androidx.core.ktx)
+    // Reads the words on PDF pages, for selecting them. BouncyCastle is only needed for PDFs
+    // encrypted with certificates (rare); password and "no copying" encryption works without it.
+    implementation(libs.pdfbox.android) { exclude(group = "org.bouncycastle") }
     testImplementation(libs.junit)
     testImplementation("org.json:json:20240303") // real org.json for JVM unit tests (Android's is a stub)
     androidTestImplementation(libs.androidx.junit)
