@@ -26,6 +26,9 @@ class LookupPopup(
     wordCenterY: Int,
     private val onSuggestion: (String) -> Unit,
     private val onChangeDictionary: () -> Unit,
+    /** Null hides the Translate button (Google Translate not installed). */
+    onTranslate: (() -> Unit)?,
+    onCopy: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     class Content(
@@ -66,11 +69,25 @@ class LookupPopup(
             maxLines = 1
             setOnClickListener { onChangeDictionary() }
         }
-        val close = button("Close").apply { setOnClickListener { dialog.dismiss() } }
-        val bar = LinearLayout(activity).apply {
+        // Row 1: which dictionary. Row 2: the other actions, so none needs an extra menu.
+        val actions = ArrayList<TextView>()
+        if (onTranslate != null) actions += button("Translate").apply {
+            setOnClickListener { dialog.dismiss(); onTranslate() }
+        }
+        actions += button("Copy").apply { setOnClickListener { dialog.dismiss(); onCopy() } }
+        actions += button("Close").apply { setOnClickListener { dialog.dismiss() } }
+        val actionRow = LinearLayout(activity).apply {
             orientation = LinearLayout.HORIZONTAL
-            addView(dictButton, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginEnd = dp(12) })
-            addView(close, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
+            for ((i, b) in actions.withIndex()) {
+                addView(b, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply {
+                    if (i > 0) marginStart = dp(12)
+                })
+            }
+        }
+        val bar = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(dictButton, MATCH_PARENT, WRAP_CONTENT)
+            addView(actionRow, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = dp(8) })
         }
         val root = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL

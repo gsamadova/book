@@ -49,6 +49,12 @@ class MainActivity : Activity() {
     private var pendingOffset = 0
     private var fontSp = 20
     private var paragraphSpacing = 1 // index into Pages.PARAGRAPH_SPACINGS
+    private var oneWordAction = OneWord.DICTIONARY
+    private var severalWordsAction = SeveralWords.TRANSLATE
+
+    /** What a selection does on release; ASK shows the action list. */
+    private enum class OneWord(val label: String) { DICTIONARY("Dictionary"), TRANSLATE("Google Translate"), ASK("Ask") }
+    private enum class SeveralWords(val label: String) { TRANSLATE("Google Translate"), COPY("Copy"), ASK("Ask") }
     private var loading = false
     private var jobId = 0
     private var laidOutW = 0
@@ -63,6 +69,10 @@ class MainActivity : Activity() {
         prefs = getSharedPreferences("reader", MODE_PRIVATE)
         fontSp = prefs.getInt("font_sp", 20)
         paragraphSpacing = prefs.getInt("paragraph_spacing", 1).coerceIn(0, Pages.PARAGRAPH_SPACINGS.lastIndex)
+        oneWordAction = OneWord.entries.firstOrNull { it.name == prefs.getString("one_word_action", null) }
+            ?: OneWord.DICTIONARY
+        severalWordsAction = SeveralWords.entries.firstOrNull { it.name == prefs.getString("several_words_action", null) }
+            ?: SeveralWords.TRANSLATE
 
         pageView = PageView(this)
         setContentView(pageView)
@@ -310,6 +320,8 @@ class MainActivity : Activity() {
             actions += "Larger text (${fontSp + 2})" to { changeFont(+2) }
             actions += "Smaller text (${fontSp - 2})" to { changeFont(-2) }
             actions += "Paragraph spacing: ${Pages.PARAGRAPH_SPACINGS[paragraphSpacing].first}" to ::chooseParagraphSpacing
+            actions += "One word: ${oneWordAction.label}" to ::chooseOneWordAction
+            actions += "Several words: ${severalWordsAction.label}" to ::chooseSeveralWordsAction
         }
         showList(b?.title ?: "Reader", actions.map { it.first }) { actions[it].second() }
     }
@@ -326,6 +338,31 @@ class MainActivity : Activity() {
                         prefs.edit().putInt("paragraph_spacing", which).apply()
                         loadChapter(chapter, currentOffset()) // same text, new layout: position is kept
                     }
+                }
+        )
+    }
+
+    private fun chooseOneWordAction() {
+        chooseOption("When one word is selected", OneWord.entries.map { it.label }, oneWordAction.ordinal) {
+            oneWordAction = OneWord.entries[it]
+            prefs.edit().putString("one_word_action", oneWordAction.name).apply()
+        }
+    }
+
+    private fun chooseSeveralWordsAction() {
+        chooseOption("When several words are selected", SeveralWords.entries.map { it.label }, severalWordsAction.ordinal) {
+            severalWordsAction = SeveralWords.entries[it]
+            prefs.edit().putString("several_words_action", severalWordsAction.name).apply()
+        }
+    }
+
+    private fun chooseOption(title: String, names: List<String>, selected: Int, onPick: (Int) -> Unit) {
+        showPlain(
+            AlertDialog.Builder(this)
+                .setTitle(title)
+                .setSingleChoiceItems(names.toTypedArray(), selected) { dialog, which ->
+                    dialog.dismiss()
+                    onPick(which)
                 }
         )
     }
@@ -459,8 +496,31 @@ class MainActivity : Activity() {
 
     // ---------------------------------------------------------------- selection actions
 
-    /** After a selection: Dictionary (one word only), Google Translate (if installed), Copy. */
+    /**
+     * One gesture, no menu: by default one word opens the dictionary and several words open
+     * Google Translate. Falls back when the chosen tool isn't available; "Ask" shows the list.
+     */
     private fun onTextSelected(text: String, singleWord: Boolean, centerY: Int) {
+        val hasDictionary = dictionaries.list().isNotEmpty()
+        val translate = translateIntent(text)
+        if (singleWord) {
+            when {
+                oneWordAction == OneWord.DICTIONARY && hasDictionary -> return lookUpWord(text, centerY)
+                oneWordAction == OneWord.TRANSLATE && translate != null -> return openTranslate(translate)
+                oneWordAction != OneWord.ASK && hasDictionary -> return lookUpWord(text, centerY)
+                oneWordAction != OneWord.ASK && translate != null -> return openTranslate(translate)
+            }
+        } else {
+            when {
+                severalWordsAction == SeveralWords.TRANSLATE && translate != null -> return openTranslate(translate)
+                severalWordsAction != SeveralWords.ASK -> return copyText(text)
+            }
+        }
+        askSelectionAction(text, singleWord, centerY)
+    }
+
+    /** The action list: Dictionary (one word only), Google Translate (if installed), Copy. */
+    private fun askSelectionAction(text: String, singleWord: Boolean, centerY: Int) {
         val actions = ArrayList<Pair<String, () -> Unit>>()
         if (singleWord && dictionaries.list().isNotEmpty()) actions += "Dictionary" to { lookUpWord(text, centerY) }
         translateIntent(text)?.let { intent -> actions += "Google Translate" to { openTranslate(intent) } }
@@ -579,6 +639,8 @@ class MainActivity : Activity() {
             onChangeDictionary = {
                 chooseDictionary(dictionaries.list()) { chosen -> lookUp(chosen, word, centerY) }
             },
+            onTranslate = translateIntent(word)?.let { intent -> { openTranslate(intent) } },
+            onCopy = { copyText(word) },
             onDismiss = {
                 popup = null
                 pageView.clearSelection()
