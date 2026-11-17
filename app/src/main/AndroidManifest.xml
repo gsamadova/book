@@ -1,6 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- Only for syncing the reading position (optional, off until you sign in). -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
     <!-- Android 11+ hides other apps unless declared: needed to detect Google Translate. -->
     <queries>
         <package android:name="com.google.android.apps.translate" />

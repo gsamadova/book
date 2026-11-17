@@ -14,12 +14,19 @@ import android.os.Handler
 import android.os.Looper
 import android.provider.OpenableColumns
 import android.util.TypedValue
+import android.text.InputType
+import android.text.format.DateUtils
 import android.view.KeyEvent
+import android.widget.EditText
+import android.widget.LinearLayout
+import android.widget.TextView
 import android.widget.Toast
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import com.guny90.reader.dict.DefinitionText
 import com.guny90.reader.dict.Dictionaries
+import com.guny90.reader.sync.KoSync
+import com.guny90.reader.sync.PositionSync
 import java.io.File
 import java.util.concurrent.Executors
 
@@ -32,6 +39,12 @@ class MainActivity : Activity() {
     private val worker = Executors.newSingleThreadExecutor()
     /** Separate thread so a lookup never waits behind a chapter load. */
     private val dictWorker = Executors.newSingleThreadExecutor()
+    /** Network calls for position sync; never blocks reading. */
+    private val syncWorker = Executors.newSingleThreadExecutor()
+    private val positionSync by lazy { PositionSync(prefs, deviceName()) }
+    /** Book fingerprint (same on every device), used as the sync document id. */
+    private var bookHash: String? = null
+    private var syncCheckPending = false
     private val mainHandler = Handler(Looper.getMainLooper())
     private lateinit var prefs: SharedPreferences
     private lateinit var pageView: PageView
@@ -102,12 +115,24 @@ class MainActivity : Activity() {
         intent.data?.let { openUri(it) }
     }
 
+    override fun onResume() {
+        super.onResume()
+        // Back from another app or screen turned on: another device may have read on.
+        if (book != null && !syncCheckPending) checkRemotePosition()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        pushPosition() // leaving the app or screen turning off
+    }
+
     override fun onDestroy() {
         val b = book
         worker.execute { b?.close() }
         worker.shutdown()
         dictWorker.execute { dictionaries.closeAll() }
         dictWorker.shutdown()
+        syncWorker.shutdown() // lets a pending upload finish
         super.onDestroy()
     }
 
@@ -163,8 +188,9 @@ class MainActivity : Activity() {
                     tmp.delete()
                 }
                 val opened = EpubBook.open(bookFile)
+                val hash = KoSync.partialMd5(bookFile)
                 mainHandler.post {
-                    if (id == jobId) setBook(opened) else worker.execute { opened.close() }
+                    if (id == jobId) setBook(opened, hash) else worker.execute { opened.close() }
                 }
             } catch (e: Exception) {
                 mainHandler.post {
@@ -188,7 +214,8 @@ class MainActivity : Activity() {
         worker.execute {
             try {
                 val opened = EpubBook.open(bookFile)
-                mainHandler.post { if (id == jobId) setBook(opened) else worker.execute { opened.close() } }
+                val hash = KoSync.partialMd5(bookFile)
+                mainHandler.post { if (id == jobId) setBook(opened, hash) else worker.execute { opened.close() } }
             } catch (e: Exception) {
                 mainHandler.post {
                     loading = false
@@ -198,7 +225,8 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun setBook(newBook: EpubBook) {
+    private fun setBook(newBook: EpubBook, hash: String) {
+        pushPosition() // the book being replaced
         val old = book
         if (old != null) worker.execute { old.close() }
         book = newBook
@@ -208,6 +236,8 @@ class MainActivity : Activity() {
         val saved = prefs.getString(bookKey, null)?.split(':')
         val ch = saved?.getOrNull(0)?.toIntOrNull() ?: 0
         val offset = saved?.getOrNull(1)?.toIntOrNull() ?: 0
+        bookHash = hash
+        syncCheckPending = true // after the first page is shown
         loadChapter(ch, offset)
     }
 
@@ -247,6 +277,10 @@ class MainActivity : Activity() {
                     pages = result
                     loading = false
                     showPage(result.pageForOffset(offset))
+                    if (syncCheckPending) {
+                        syncCheckPending = false
+                        checkRemotePosition()
+                    }
                 }
             } catch (e: Exception) {
                 mainHandler.post {
@@ -323,6 +357,7 @@ class MainActivity : Activity() {
             actions += "One word: ${oneWordAction.label}" to ::chooseOneWordAction
             actions += "Several words: ${severalWordsAction.label}" to ::chooseSeveralWordsAction
         }
+        actions += "Sync: ${if (positionSync.isEnabled) positionSync.username else "Off"}" to ::showSyncSettings
         showList(b?.title ?: "Reader", actions.map { it.first }) { actions[it].second() }
     }
 
@@ -648,6 +683,172 @@ class MainActivity : Activity() {
         )
         popup = newPopup
         newPopup.show(content)
+    }
+
+    // ---------------------------------------------------------------- position sync
+
+    private fun deviceName(): String {
+        val maker = Build.MANUFACTURER.replaceFirstChar { it.titlecase() }
+        return if (Build.MODEL.startsWith(Build.MANUFACTURER, ignoreCase = true)) Build.MODEL else "$maker ${Build.MODEL}"
+    }
+
+    private fun currentPosition() = PositionSync.Position(chapter, currentOffset().coerceAtLeast(0))
+
+    /** Rough share of the book read, for showing "45%" on the other device. */
+    private fun percentRead(): Double {
+        val chapters = book?.spine?.size ?: return 0.0
+        val length = chapterText?.length ?: 0
+        val inChapter = if (length > 0) (currentOffset().toDouble() / length).coerceIn(0.0, 1.0) else 0.0
+        return ((chapter + inChapter) / chapters).coerceIn(0.0, 1.0)
+    }
+
+    /** Uploads the position in the background; failures (e.g. no Wi-Fi) are retried next time. */
+    private fun pushPosition(force: Boolean = false, onDone: ((Exception?) -> Unit)? = null) {
+        val hash = bookHash
+        if (!positionSync.isEnabled || hash == null || pages == null) {
+            onDone?.invoke(null)
+            return
+        }
+        val position = currentPosition()
+        val percentage = percentRead()
+        syncWorker.execute {
+            val error = try { positionSync.push(hash, position, percentage, force); null } catch (e: Exception) { e }
+            if (onDone != null) mainHandler.post { onDone(error) }
+        }
+    }
+
+    /** Offers to jump if another device uploaded a different position since we last looked. */
+    private fun checkRemotePosition(onDone: ((found: Boolean, error: Exception?) -> Unit)? = null) {
+        val hash = bookHash
+        if (!positionSync.isEnabled || hash == null) {
+            onDone?.invoke(false, null)
+            return
+        }
+        val current = currentPosition()
+        syncWorker.execute {
+            val (remote, error) = try { positionSync.pullNewer(hash, current) to null } catch (e: Exception) { null to e }
+            mainHandler.post {
+                if (remote != null && hash == bookHash) offerRemotePosition(hash, remote)
+                onDone?.invoke(remote != null, error)
+            }
+        }
+    }
+
+    private fun offerRemotePosition(hash: String, remote: PositionSync.Remote) {
+        val b = book ?: return
+        val chapters = b.spine.size
+        val now = System.currentTimeMillis()
+        val whenRead = if (now - remote.timestamp * 1000 < DateUtils.MINUTE_IN_MILLIS) "just now"
+        else DateUtils.getRelativeTimeSpanString(remote.timestamp * 1000, now, DateUtils.MINUTE_IN_MILLIS)
+        val message = "${remote.device} is at ${(remote.percentage * 100).toInt()}% " +
+            "(chapter ${remote.position.chapter + 1} of $chapters), $whenRead.\n\n" +
+            "This device is at ${(percentRead() * 100).toInt()}% (chapter ${chapter + 1})."
+        showPlain(
+            AlertDialog.Builder(this)
+                .setTitle("Continue from ${remote.device}?")
+                .setMessage(message)
+                .setPositiveButton("Go there") { _, _ ->
+                    positionSync.markSeen(hash, remote.timestamp)
+                    loadChapter(remote.position.chapter, remote.position.offset)
+                }
+                .setNegativeButton("Stay here") { _, _ -> positionSync.declined(hash, remote.timestamp) }
+                .setOnCancelListener { positionSync.declined(hash, remote.timestamp) }
+        )
+    }
+
+    private fun showSyncSettings() {
+        if (!positionSync.isEnabled) return showSignIn()
+        showPlain(
+            AlertDialog.Builder(this)
+                .setTitle("Sync reading position")
+                .setMessage(
+                    "Signed in as ${positionSync.username}\nServer: ${positionSync.server}\n\n" +
+                        "The position is uploaded when you leave the app or turn off the screen, " +
+                        "and checked when you open a book or come back to it. " +
+                        "Use the same account on your other devices."
+                )
+                .setPositiveButton("Sync now") { _, _ -> syncNow() }
+                .setNegativeButton("Sign out") { _, _ -> positionSync.signOut() }
+                .setNeutralButton("Close", null)
+        )
+    }
+
+    private fun syncNow() {
+        if (bookHash == null) return showMessage("Sync", "Open a book first.")
+        pushPosition(force = true) { pushError ->
+            checkRemotePosition { found, pullError ->
+                val error = pushError ?: pullError
+                when {
+                    error != null -> showMessage("Sync failed", error.message ?: error.javaClass.simpleName)
+                    !found -> showMessage("Sync", "Up to date. This book's position is saved on the server.")
+                }
+            }
+        }
+    }
+
+    private fun showSignIn() {
+        val pad = (20 * resources.displayMetrics.density).toInt()
+        fun field(hint: String, value: String = "", password: Boolean = false) = EditText(this).apply {
+            this.hint = hint
+            setText(value)
+            setSingleLine()
+            inputType = if (password) InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            else InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+        }
+        val server = field("Server", positionSync.server)
+        val user = field("Username", positionSync.username ?: "")
+        val password = field("Password", password = true)
+        val status = TextView(this).apply {
+            text = "Uses a KOReader sync server. Use the same account on every device."
+            setPadding(0, pad / 2, 0, 0)
+        }
+        val form = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(pad, pad / 2, pad, 0)
+            addView(server)
+            addView(user)
+            addView(password)
+            addView(status)
+        }
+        val dialog = showPlain(
+            AlertDialog.Builder(this)
+                .setTitle("Sync reading position")
+                .setView(form)
+                .setPositiveButton("Sign in", null)
+                .setNeutralButton("Create account", null)
+                .setNegativeButton("Cancel", null)
+        )
+        // Own click handling so the dialog stays open while connecting and on errors.
+        fun submit(register: Boolean) {
+            val url = server.text.toString().trim()
+            val name = user.text.toString().trim()
+            val pass = password.text.toString()
+            val problem = when {
+                !url.startsWith("https://") && !url.startsWith("http://") -> "The server address must start with https://"
+                name.isEmpty() || name.contains(':') -> "Enter a username (without \":\")."
+                pass.isEmpty() -> "Enter a password."
+                else -> null
+            }
+            if (problem != null) {
+                status.text = problem
+                return
+            }
+            status.text = if (register) "Creating account…" else "Signing in…"
+            syncWorker.execute {
+                val error = try { positionSync.signIn(url, name, pass, register); null } catch (e: Exception) { e }
+                mainHandler.post {
+                    if (error != null) {
+                        status.text = error.message ?: error.javaClass.simpleName
+                    } else {
+                        dialog.dismiss()
+                        showMessage("Sync", "Signed in as $name.")
+                        checkRemotePosition()
+                    }
+                }
+            }
+        }
+        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener { submit(register = false) }
+        dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener { submit(register = true) }
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
