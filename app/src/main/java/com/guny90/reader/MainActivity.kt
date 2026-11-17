@@ -1,6 +1,7 @@
 package com.guny90.reader
 
 import android.app.Activity
+import android.app.ActivityManager
 import android.app.AlertDialog
 import android.content.ClipData
 import android.content.ClipboardManager
@@ -271,6 +272,7 @@ class MainActivity : Activity() {
         val old = book
         if (old != null) worker.execute { old.close() }
         book = newBook
+        showTitleInRecents(newBook.title)
         bookKey = "pos_" + (newBook.title + "|" + bookFile.length()).hashCode()
         chapterText = null
         pages = null
@@ -280,6 +282,16 @@ class MainActivity : Activity() {
         bookHash = hash
         syncCheckPending = true // after the first page is shown
         loadChapter(ch, offset)
+    }
+
+    /** Labels this app's card in the recent-apps screen with the book title instead of "Reader". */
+    private fun showTitleInRecents(title: String) {
+        val description = if (Build.VERSION.SDK_INT >= 33) {
+            ActivityManager.TaskDescription.Builder().setLabel(title).build()
+        } else {
+            @Suppress("DEPRECATION") ActivityManager.TaskDescription(title)
+        }
+        setTaskDescription(description)
     }
 
     // ---------------------------------------------------------------- layout & paging
