@@ -209,7 +209,7 @@ class MainActivity : Activity() {
                     "Open book"
                 ), REQUEST_OPEN)
             } catch (e2: ActivityNotFoundException) {
-                pageView.showMessage("No file picker found on this device.\nOpen an .epub or .pdf from your file manager with Reader.")
+                pageView.showMessage("No file picker found on this device.\nOpen an .epub or .pdf from your file manager with Book.")
             }
         }
     }
@@ -278,7 +278,7 @@ class MainActivity : Activity() {
     private fun restoreLastBook() {
         val file = listOf(bookFile, pdfFile).filter { it.exists() }.maxByOrNull { it.lastModified() }
         if (file == null) {
-            pageView.showMessage("Reader\n\nTap the middle of the screen\nto open an .epub or .pdf book.")
+            pageView.showMessage("Book\n\nTap the middle of the screen\nto open an .epub or .pdf book.")
             return
         }
         val id = ++jobId
@@ -345,7 +345,7 @@ class MainActivity : Activity() {
         loadChapter(ch, offset)
     }
 
-    /** Labels this app's card in the recent-apps screen with the book title instead of "Reader". */
+    /** Labels this app's card in the recent-apps screen with the book title instead of "Book". */
     private fun showTitleInRecents(title: String) {
         val description = if (Build.VERSION.SDK_INT >= 33) {
             ActivityManager.TaskDescription.Builder().setLabel(title).build()
@@ -618,7 +618,7 @@ class MainActivity : Activity() {
         }
         actions += "Sync: ${if (positionSync.isEnabled) positionSync.username else "Off"}" to ::showSyncSettings
         actions += "Open book…" to ::pickBook
-        showList(d?.title ?: b?.title ?: "Reader", actions.map { it.first }) { actions[it].second() }
+        showList(d?.title ?: b?.title ?: "Book", actions.map { it.first }) { actions[it].second() }
     }
 
     /** Text size, spacing and pictures. Stays open after a quick change, so you can tap again. */
@@ -910,7 +910,7 @@ class MainActivity : Activity() {
     private fun copyText(text: String) {
         pageView.clearSelection()
         val clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
-        clipboard.setPrimaryClip(ClipData.newPlainText("Reader", text))
+        clipboard.setPrimaryClip(ClipData.newPlainText("Book", text))
         // Android 13+ shows its own "copied" confirmation.
         if (Build.VERSION.SDK_INT < 33) Toast.makeText(this, "Copied", Toast.LENGTH_SHORT).show()
     }

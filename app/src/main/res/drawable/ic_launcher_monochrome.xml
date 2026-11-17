@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Monochrome (themed icon) version: outlines only. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <group
+        android:pivotX="54"
+        android:pivotY="54"
+        android:scaleX="0.88"
+        android:scaleY="0.88"
+        android:translateY="-1">
+        <!-- pages -->
+        <path
+            android:fillColor="#00000000"
+            android:strokeColor="#000000"
+            android:strokeWidth="2"
+            android:strokeLineJoin="round"
+            android:pathData="M54,41C47,35.5 36,34.5 26,36.5L26,71C36,69 47,69.5 54,75Z" />
+        <path
+            android:fillColor="#00000000"
+            android:strokeColor="#000000"
+            android:strokeWidth="2"
+            android:strokeLineJoin="round"
+            android:pathData="M54,41C61,35.5 72,34.5 82,36.5L82,71C72,69 61,69.5 54,75Z" />
+        <!-- lines of text -->
+        <path
+            android:strokeColor="#000000"
+            android:strokeWidth="2"
+            android:strokeLineCap="round"
+            android:pathData="M31,44.5C37,43.5 44,44 49,46.5M31,51C37,50 44,50.5 49,53M31,57.5C37,56.5 44,57 49,59.5M31,64C36,63.2 41,63.5 44,64.8" />
+        <path
+            android:strokeColor="#000000"
+            android:strokeWidth="2"
+            android:strokeLineCap="round"
+            android:pathData="M77,44.5C71,43.5 64,44 59,46.5M77,51C71,50 64,50.5 59,53M77,57.5C71,56.5 64,57 59,59.5M77,64C72,63.2 67,63.5 64,64.8" />
+    </group>
+</vector>
