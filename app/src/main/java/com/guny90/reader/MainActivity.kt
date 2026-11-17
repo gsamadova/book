@@ -61,10 +61,15 @@ class MainActivity : Activity() {
     private lateinit var pageView: PageView
 
     private val bookFile by lazy { File(filesDir, "current.epub") }
+    /** The current book when it is a PDF (then [bookFile] doesn't exist). */
+    private val pdfFile by lazy { File(filesDir, "current.pdf") }
     private val dictionaries by lazy { Dictionaries(File(filesDir, "dicts")) }
 
     // UI-thread state
     private var book: EpubBook? = null
+    /** Open PDF (instead of [book]); its pages are shown as pictures. */
+    private var pdf: PdfBook? = null
+    private var pdfPage = 0
     private var bookKey = ""
     private var chapter = 0
     private var chapterText: CharSequence? = null
@@ -85,7 +90,7 @@ class MainActivity : Activity() {
     private enum class OneWord(val label: String) { DICTIONARY("Dictionary"), TRANSLATE("Google Translate"), ASK("Ask") }
     private enum class SeveralWords(val label: String) { TRANSLATE("Google Translate"), COPY("Copy"), ASK("Ask") }
     private var loading = false
-    private var jobId = 0
+    @Volatile private var jobId = 0 // also read on the worker, to skip superseded PDF renders
     private var laidOutW = 0
     private var laidOutH = 0
     private var popup: LookupPopup? = null
@@ -164,7 +169,7 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         // Back from another app or screen turned on: another device may have read on.
-        if (book != null && !syncCheckPending) checkRemotePosition()
+        if ((book != null || pdf != null) && !syncCheckPending) checkRemotePosition()
     }
 
     override fun onPause() {
@@ -175,7 +180,11 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         val b = book
-        worker.execute { b?.close() }
+        val d = pdf
+        worker.execute {
+            b?.close()
+            d?.close()
+        }
         worker.shutdown()
         dictWorker.execute { dictionaries.closeAll() }
         dictWorker.shutdown()
@@ -200,7 +209,7 @@ class MainActivity : Activity() {
                     "Open book"
                 ), REQUEST_OPEN)
             } catch (e2: ActivityNotFoundException) {
-                pageView.showMessage("No file picker found on this device.\nOpen an .epub from your file manager with Reader.")
+                pageView.showMessage("No file picker found on this device.\nOpen an .epub or .pdf from your file manager with Reader.")
             }
         }
     }
@@ -227,18 +236,33 @@ class MainActivity : Activity() {
         pageView.showMessage("Opening…")
         worker.execute {
             try {
-                val tmp = File(filesDir, "incoming.epub")
+                val tmp = File(filesDir, "incoming")
                 val input = contentResolver.openInputStream(uri) ?: error("Cannot read file")
                 input.use { inp -> tmp.outputStream().use { inp.copyTo(it, 64 * 1024) } }
-                EpubBook.open(tmp).close() // validate before replacing the current book
-                if (!tmp.renameTo(bookFile)) {
-                    tmp.copyTo(bookFile, overwrite = true)
+                val isPdf = PdfBook.isPdf(tmp)
+                // Validate before replacing the current book.
+                if (isPdf) PdfBook.open(tmp, "").close() else EpubBook.open(tmp).close()
+                val target = if (isPdf) pdfFile else bookFile
+                if (!tmp.renameTo(target)) {
+                    tmp.copyTo(target, overwrite = true)
                     tmp.delete()
                 }
-                val opened = EpubBook.open(bookFile)
-                val hash = KoSync.partialMd5(bookFile)
-                mainHandler.post {
-                    if (id == jobId) setBook(opened, hash) else worker.execute { opened.close() }
+                (if (isPdf) bookFile else pdfFile).delete() // only one current book
+                val hash = KoSync.partialMd5(target)
+                if (isPdf) {
+                    // A PDF's title isn't readable without a library: use the file name.
+                    val title = displayName(uri)?.let { if (it.endsWith(".pdf", true)) it.dropLast(4) else it }
+                        ?.ifBlank { null } ?: "PDF"
+                    prefs.edit().putString("pdf_title", title).apply()
+                    val opened = PdfBook.open(pdfFile, title)
+                    mainHandler.post {
+                        if (id == jobId) setPdf(opened, hash) else worker.execute { opened.close() }
+                    }
+                } else {
+                    val opened = EpubBook.open(bookFile)
+                    mainHandler.post {
+                        if (id == jobId) setBook(opened, hash) else worker.execute { opened.close() }
+                    }
                 }
             } catch (e: Exception) {
                 mainHandler.post {
@@ -252,8 +276,9 @@ class MainActivity : Activity() {
     }
 
     private fun restoreLastBook() {
-        if (!bookFile.exists()) {
-            pageView.showMessage("Reader\n\nTap the middle of the screen\nto open an .epub book.")
+        val file = listOf(bookFile, pdfFile).filter { it.exists() }.maxByOrNull { it.lastModified() }
+        if (file == null) {
+            pageView.showMessage("Reader\n\nTap the middle of the screen\nto open an .epub or .pdf book.")
             return
         }
         val id = ++jobId
@@ -261,23 +286,52 @@ class MainActivity : Activity() {
         pageView.showMessage("Opening…")
         worker.execute {
             try {
-                val opened = EpubBook.open(bookFile)
-                val hash = KoSync.partialMd5(bookFile)
-                mainHandler.post { if (id == jobId) setBook(opened, hash) else worker.execute { opened.close() } }
+                val hash = KoSync.partialMd5(file)
+                if (file == pdfFile) {
+                    val opened = PdfBook.open(pdfFile, prefs.getString("pdf_title", null) ?: "PDF")
+                    mainHandler.post { if (id == jobId) setPdf(opened, hash) else worker.execute { opened.close() } }
+                } else {
+                    val opened = EpubBook.open(bookFile)
+                    mainHandler.post { if (id == jobId) setBook(opened, hash) else worker.execute { opened.close() } }
+                }
             } catch (e: Exception) {
                 mainHandler.post {
                     loading = false
-                    pageView.showMessage("Tap the middle of the screen\nto open an .epub book.")
+                    pageView.showMessage("Tap the middle of the screen\nto open an .epub or .pdf book.")
                 }
             }
         }
     }
 
-    private fun setBook(newBook: EpubBook, hash: String) {
+    /** Saves the position of the open book (EPUB or PDF) and closes it. */
+    private fun closeCurrentBook() {
         stopReadingAloud()
         pushPosition() // the book being replaced
-        val old = book
-        if (old != null) worker.execute { old.close() }
+        val oldBook = book
+        val oldPdf = pdf
+        book = null
+        pdf = null
+        if (oldBook != null || oldPdf != null) worker.execute {
+            oldBook?.close()
+            oldPdf?.close()
+        }
+    }
+
+    private fun setPdf(newPdf: PdfBook, hash: String) {
+        closeCurrentBook()
+        pdf = newPdf
+        showTitleInRecents(newPdf.title)
+        bookKey = "pos_" + (newPdf.title + "|" + pdfFile.length()).hashCode()
+        chapterText = null
+        pages = null
+        bookHash = hash
+        syncCheckPending = true // after the first page is shown
+        val saved = prefs.getString(bookKey, null)?.substringBefore(':')?.toIntOrNull() ?: 0
+        showPdfPage(saved)
+    }
+
+    private fun setBook(newBook: EpubBook, hash: String) {
+        closeCurrentBook()
         book = newBook
         showTitleInRecents(newBook.title)
         bookKey = "pos_" + (newBook.title + "|" + bookFile.length()).hashCode()
@@ -374,6 +428,12 @@ class MainActivity : Activity() {
     }
 
     private fun onTextAreaLaidOut() {
+        if (pdf != null) {
+            if (pageView.imageWidth > 0 && pageView.imageHeight > 0 &&
+                (pageView.imageWidth != laidOutW || pageView.imageHeight != laidOutH)
+            ) showPdfPage(pdfPage)
+            return
+        }
         val w = pageView.textWidth
         val h = pageView.textHeight
         if (book == null || w <= 0 || h <= 0 || (w == laidOutW && h == laidOutH)) return
@@ -403,7 +463,58 @@ class MainActivity : Activity() {
         prefs.edit().putString(bookKey, "$chapter:${p.offsetOf(page)}").apply()
     }
 
+    /**
+     * Renders and shows PDF page [index]. Taps while a page is rendering aren't lost: the newest
+     * request wins. The next page is rendered ahead, so paging forward is usually instant.
+     */
+    private fun showPdfPage(index: Int) {
+        val d = pdf ?: return
+        val target = index.coerceIn(0, d.pageCount - 1)
+        pdfPage = target
+        val w = pageView.imageWidth
+        val h = pageView.imageHeight
+        if (w <= 0 || h <= 0) {
+            loading = true // the view isn't measured yet; onTextAreaLaidOut will call us again
+            return
+        }
+        laidOutW = w
+        laidOutH = h
+        val id = ++jobId
+        loading = true
+        worker.execute {
+            if (id != jobId) return@execute // already superseded by a later tap
+            val result = try {
+                Result.success(d.page(target, w, h))
+            } catch (e: Throwable) { // includes OutOfMemoryError
+                Result.failure(e)
+            }
+            mainHandler.post {
+                if (id != jobId || pdf !== d) return@post
+                loading = false
+                val bitmap = result.getOrNull()
+                if (bitmap != null) {
+                    pageView.showImage(bitmap, d.title, "${target + 1}/${d.pageCount}")
+                } else {
+                    val e = result.exceptionOrNull()
+                    pageView.showMessage("Could not show page ${target + 1}.\n${e?.message ?: e?.javaClass?.simpleName ?: ""}")
+                }
+                prefs.edit().putString(bookKey, "$target:0").apply()
+                if (syncCheckPending) {
+                    syncCheckPending = false
+                    checkRemotePosition()
+                }
+            }
+            if (target + 1 < d.pageCount && id == jobId) {
+                try { d.page(target + 1, w, h) } catch (e: Throwable) { } // shown later, or the error then
+            }
+        }
+    }
+
     private fun nextPage() {
+        pdf?.let { d ->
+            if (pdfPage + 1 < d.pageCount) showPdfPage(pdfPage + 1)
+            return
+        }
         val p = pages ?: return
         if (loading) return
         when {
@@ -413,6 +524,10 @@ class MainActivity : Activity() {
     }
 
     private fun prevPage() {
+        if (pdf != null) {
+            if (pdfPage > 0) showPdfPage(pdfPage - 1)
+            return
+        }
         if (pages == null || loading) return
         when {
             page > 0 -> showPage(page - 1)
@@ -481,8 +596,16 @@ class MainActivity : Activity() {
 
     private fun showMenu() {
         val b = book
+        val d = pdf
         val actions = ArrayList<Pair<String, () -> Unit>>()
         actions += "Open book…" to ::pickBook
+        if (d != null) {
+            // Pages are pictures: no text settings, dictionary or reading aloud.
+            actions += "Go to page… (${pdfPage + 1} of ${d.pageCount})" to ::showGoToPage
+            actions += "Sync: ${if (positionSync.isEnabled) positionSync.username else "Off"}" to ::showSyncSettings
+            showList(d.title, actions.map { it.first }) { actions[it].second() }
+            return
+        }
         actions += "Dictionaries" to ::showDictionaries
         if (b != null) {
             actions += "Contents" to ::showContents
@@ -546,6 +669,38 @@ class MainActivity : Activity() {
             b.spine.indices.map { EpubBook.TocEntry("Chapter ${it + 1}", it) }
         }
         showList("Contents", entries.map { it.title }) { loadChapter(entries[it].spineIndex, 0) }
+    }
+
+    private fun showGoToPage() {
+        val d = pdf ?: return
+        val pad = (20 * resources.displayMetrics.density).toInt()
+        val input = EditText(this).apply {
+            hint = "1–${d.pageCount}"
+            setSingleLine()
+            inputType = InputType.TYPE_CLASS_NUMBER
+        }
+        val form = LinearLayout(this).apply {
+            setPadding(pad, pad / 2, pad, 0)
+            addView(input, MATCH_PARENT, WRAP_CONTENT)
+        }
+        fun go() {
+            val number = input.text.toString().trim().toIntOrNull() ?: return
+            showPdfPage(number - 1)
+        }
+        val dialog = showPlain(
+            AlertDialog.Builder(this)
+                .setTitle("Go to page")
+                .setView(form)
+                .setPositiveButton("Go") { _, _ -> go() }
+                .setNegativeButton("Cancel", null)
+        )
+        input.setOnEditorActionListener { _, _, _ ->
+            dialog.dismiss()
+            go()
+            true
+        }
+        input.requestFocus()
+        dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE)
     }
 
     private fun showList(title: String, items: List<String>, onCancel: (() -> Unit)? = null, onPick: (Int) -> Unit) {
@@ -1028,10 +1183,14 @@ class MainActivity : Activity() {
         return if (Build.MODEL.startsWith(Build.MANUFACTURER, ignoreCase = true)) Build.MODEL else "$maker ${Build.MODEL}"
     }
 
-    private fun currentPosition() = PositionSync.Position(chapter, currentOffset().coerceAtLeast(0))
+    /** For a PDF, the "chapter" is the page number (from 0) and the offset is 0. */
+    private fun currentPosition() =
+        if (pdf != null) PositionSync.Position(pdfPage, 0)
+        else PositionSync.Position(chapter, currentOffset().coerceAtLeast(0))
 
     /** Rough share of the book read, for showing "45%" on the other device. */
     private fun percentRead(): Double {
+        pdf?.let { return ((pdfPage + 1).toDouble() / it.pageCount).coerceIn(0.0, 1.0) }
         val chapters = book?.spine?.size ?: return 0.0
         val length = chapterText?.length ?: 0
         val inChapter = if (length > 0) (currentOffset().toDouble() / length).coerceIn(0.0, 1.0) else 0.0
@@ -1041,7 +1200,7 @@ class MainActivity : Activity() {
     /** Uploads the position in the background; failures (e.g. no Wi-Fi) are retried next time. */
     private fun pushPosition(force: Boolean = false, onDone: ((Exception?) -> Unit)? = null) {
         val hash = bookHash
-        if (!positionSync.isEnabled || hash == null || pages == null) {
+        if (!positionSync.isEnabled || hash == null || (pages == null && pdf == null)) {
             onDone?.invoke(null)
             return
         }
@@ -1071,21 +1230,25 @@ class MainActivity : Activity() {
     }
 
     private fun offerRemotePosition(hash: String, remote: PositionSync.Remote) {
-        val b = book ?: return
-        val chapters = b.spine.size
+        val d = pdf
+        val (unit, count, here) = when {
+            d != null -> Triple("page", d.pageCount, pdfPage)
+            else -> Triple("chapter", book?.spine?.size ?: return, chapter)
+        }
         val now = System.currentTimeMillis()
         val whenRead = if (now - remote.timestamp * 1000 < DateUtils.MINUTE_IN_MILLIS) "just now"
         else DateUtils.getRelativeTimeSpanString(remote.timestamp * 1000, now, DateUtils.MINUTE_IN_MILLIS)
         val message = "${remote.device} is at ${(remote.percentage * 100).toInt()}% " +
-            "(chapter ${remote.position.chapter + 1} of $chapters), $whenRead.\n\n" +
-            "This device is at ${(percentRead() * 100).toInt()}% (chapter ${chapter + 1})."
+            "($unit ${remote.position.chapter + 1} of $count), $whenRead.\n\n" +
+            "This device is at ${(percentRead() * 100).toInt()}% ($unit ${here + 1})."
         showPlain(
             AlertDialog.Builder(this)
                 .setTitle("Continue from ${remote.device}?")
                 .setMessage(message)
                 .setPositiveButton("Go there") { _, _ ->
                     positionSync.markSeen(hash, remote.timestamp)
-                    loadChapter(remote.position.chapter, remote.position.offset)
+                    if (pdf != null) showPdfPage(remote.position.chapter)
+                    else loadChapter(remote.position.chapter, remote.position.offset)
                 }
                 .setNegativeButton("Stay here") { _, _ -> positionSync.declined(hash, remote.timestamp) }
                 .setOnCancelListener { positionSync.declined(hash, remote.timestamp) }

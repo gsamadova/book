@@ -194,12 +194,16 @@ class PageView(context: Context) : View(context) {
     private var statusLeft = ""
     private var statusRight = ""
     private var message: String? = null
+    /** A page shown as a picture (PDF), instead of laid-out text. */
+    private var image: Bitmap? = null
     private var selection: IntRange? = null
     /** The sentence being read aloud (chapter offsets), underlined. */
     private var spoken: IntRange? = null
 
     private val density = resources.displayMetrics.density
     private val margin = (16 * density).toInt()
+    /** PDF pages bring their own margins (cropped to a little padding), so only a thin one here. */
+    private val imageMargin = (4 * density).toInt()
     private val statusHeight = (28 * density).toInt()
     private val statusPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.BLACK
@@ -244,6 +248,8 @@ class PageView(context: Context) : View(context) {
 
     val textWidth get() = width - paddingLeft - paddingRight - 2 * margin
     val textHeight get() = height - paddingTop - paddingBottom - margin - statusHeight
+    val imageWidth get() = width - paddingLeft - paddingRight - 2 * imageMargin
+    val imageHeight get() = height - paddingTop - paddingBottom - imageMargin - statusHeight
 
     fun showPage(pages: Pages, page: Int, statusLeft: String, statusRight: String) {
         this.pages = pages
@@ -251,12 +257,26 @@ class PageView(context: Context) : View(context) {
         this.statusLeft = statusLeft
         this.statusRight = statusRight
         message = null
+        image = null
         selection = null
+        invalidate()
+    }
+
+    /** A page that is a picture: tap zones work as usual; there is no text to select. */
+    fun showImage(bitmap: Bitmap, statusLeft: String, statusRight: String) {
+        pages = null
+        message = null
+        image = bitmap
+        selection = null
+        spoken = null
+        this.statusLeft = statusLeft
+        this.statusRight = statusRight
         invalidate()
     }
 
     fun showMessage(text: String) {
         pages = null
+        image = null
         message = text
         selection = null
         invalidate()
@@ -282,6 +302,14 @@ class PageView(context: Context) : View(context) {
     }
 
     override fun onDraw(canvas: Canvas) {
+        val bmp = image
+        if (bmp != null) {
+            val left = paddingLeft + imageMargin + (imageWidth - bmp.width) / 2f
+            val top = paddingTop + imageMargin + (imageHeight - bmp.height) / 2f
+            canvas.drawBitmap(bmp, left, top, PictureSpan.picturePaint)
+            drawStatus(canvas)
+            return
+        }
         val p = pages
         if (p == null) {
             drawMessage(canvas, message ?: "")
@@ -297,7 +325,10 @@ class PageView(context: Context) : View(context) {
         spoken?.let { drawUnderline(canvas, layout, it) }
         selection?.let { sel -> drawSelection(canvas, layout, sel) }
         canvas.restore()
+        drawStatus(canvas)
+    }
 
+    private fun drawStatus(canvas: Canvas) {
         val baseline = (height - paddingBottom - statusHeight / 3).toFloat()
         val rightWidth = statusPaint.measureText(statusRight)
         val left = (paddingLeft + margin).toFloat()
