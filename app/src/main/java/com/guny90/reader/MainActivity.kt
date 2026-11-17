@@ -75,6 +75,11 @@ class MainActivity : Activity() {
     private var paragraphSpacing = 1 // index into Pages.PARAGRAPH_SPACINGS
     private var oneWordAction = OneWord.DICTIONARY
     private var severalWordsAction = SeveralWords.TRANSLATE
+    private var showPictures = true
+    /** Latest page waiting for its pictures to be decoded. */
+    private var pictureJob = 0
+    /** Pictures holding a decoded bitmap, oldest first (worker thread only). */
+    private val decodedPictures = ArrayDeque<PictureSpan>()
 
     /** What a selection does on release; ASK shows the action list. */
     private enum class OneWord(val label: String) { DICTIONARY("Dictionary"), TRANSLATE("Google Translate"), ASK("Ask") }
@@ -115,6 +120,7 @@ class MainActivity : Activity() {
         severalWordsAction = SeveralWords.entries.firstOrNull { it.name == prefs.getString("several_words_action", null) }
             ?: SeveralWords.TRANSLATE
         speechRate = prefs.getFloat("speech_rate", 1f)
+        showPictures = prefs.getBoolean("pictures", true)
         volumeControlStream = AudioManager.STREAM_MUSIC
 
         pageView = PageView(this)
@@ -144,6 +150,7 @@ class MainActivity : Activity() {
         }
         pageView.onTextAreaLaidOut = ::onTextAreaLaidOut
         pageView.onTextSelected = ::onTextSelected
+        pageView.onPictureLongPress = ::openPicture
 
         val uri = intent?.data
         if (uri != null && savedInstanceState == null) openUri(uri) else restoreLastBook()
@@ -324,10 +331,14 @@ class MainActivity : Activity() {
         val textPx = TypedValue.applyDimension(
             TypedValue.COMPLEX_UNIT_SP, fontSp.toFloat(), resources.displayMetrics
         )
+        val pictures = showPictures
+        // Picture pixels are CSS pixels: as large as on a phone screen, then fitted to the page.
+        val pixelScale = resources.displayMetrics.density
         worker.execute {
             try {
-                val text = cached ?: HtmlText.toText(b.readChapter(target))
-                val result = Pages.paginate(text, w, h, textPx, spacing)
+                val text = cached ?: HtmlText.toText(b.readChapter(target), b.chapterDir(target))
+                val pictureSize: ((String) -> IntArray?)? = if (pictures) b::pictureSize else null
+                val result = Pages.paginate(text, w, h, textPx, spacing, pictureSize, pixelScale)
                 mainHandler.post {
                     if (id != jobId) return@post
                     chapterText = text
@@ -372,7 +383,18 @@ class MainActivity : Activity() {
     private fun showPage(newPage: Int) {
         val p = pages ?: return
         val b = book ?: return
-        page = newPage.coerceIn(0, p.count - 1)
+        val target = newPage.coerceIn(0, p.count - 1)
+        // Decode the page's pictures first, so the page appears once, complete (one e-ink refresh).
+        val missing = p.picturesToLoad(target)
+        val job = ++pictureJob
+        if (missing.isNotEmpty()) {
+            worker.execute {
+                for (picture in missing) decodePicture(b, picture)
+                mainHandler.post { if (job == pictureJob && pages === p) showPage(target) }
+            }
+            return
+        }
+        page = target
         pageView.showPage(
             p, page,
             statusLeft = b.title,
@@ -398,6 +420,55 @@ class MainActivity : Activity() {
         }
     }
 
+    /** Worker thread. Keeps only the last few decoded pictures in memory. */
+    private fun decodePicture(b: EpubBook, picture: PictureSpan) {
+        if (picture.bitmap != null || picture.failed) return
+        val bitmap = try {
+            b.decodePicture(picture.path, picture.width, picture.height)
+        } catch (e: Throwable) { // includes OutOfMemoryError: show a frame instead
+            null
+        }
+        if (bitmap == null) {
+            picture.failed = true
+            return
+        }
+        picture.bitmap = bitmap
+        decodedPictures.addLast(picture)
+        while (decodedPictures.size > MAX_DECODED_PICTURES) decodedPictures.removeFirst().bitmap = null
+    }
+
+    private fun togglePictures() {
+        showPictures = !showPictures
+        prefs.edit().putBoolean("pictures", showPictures).apply()
+        loadChapter(chapter, currentOffset()) // same text either way: the position is kept
+    }
+
+    /** Long-press on a picture: show it full screen, at the screen's resolution. */
+    private fun openPicture(picture: PictureSpan) {
+        val b = book ?: return
+        if (speaking) pauseReading()
+        val metrics = resources.displayMetrics
+        worker.execute {
+            val bitmap = try {
+                val size = b.pictureSize(picture.path)
+                if (size == null) null else {
+                    val fit = minOf(metrics.widthPixels.toFloat() / size[0], metrics.heightPixels.toFloat() / size[1])
+                    b.decodePicture(
+                        picture.path,
+                        (size[0] * fit).toInt().coerceAtLeast(1),
+                        (size[1] * fit).toInt().coerceAtLeast(1),
+                    )
+                }
+            } catch (e: Throwable) {
+                null
+            }
+            mainHandler.post {
+                if (bitmap == null) showMessage("Picture", "This picture can't be shown.")
+                else PictureViewer(this, bitmap) { bitmap.recycle() }.show()
+            }
+        }
+    }
+
     private fun changeFont(deltaSp: Int) {
         val newSize = (fontSp + deltaSp).coerceIn(12, 40)
         if (newSize == fontSp) return
@@ -420,6 +491,7 @@ class MainActivity : Activity() {
             actions += "Larger text (${fontSp + 2})" to { changeFont(+2) }
             actions += "Smaller text (${fontSp - 2})" to { changeFont(-2) }
             actions += "Paragraph spacing: ${Pages.PARAGRAPH_SPACINGS[paragraphSpacing].first}" to ::chooseParagraphSpacing
+            actions += "Pictures: ${if (showPictures) "On" else "Off"}" to ::togglePictures
             actions += "One word: ${oneWordAction.label}" to ::chooseOneWordAction
             actions += "Several words: ${severalWordsAction.label}" to ::chooseSeveralWordsAction
         }
@@ -1137,6 +1209,7 @@ class MainActivity : Activity() {
         private const val REQUEST_OPEN = 1
         private const val REQUEST_DICTIONARY = 2
         private const val GOOGLE_TRANSLATE = "com.google.android.apps.translate"
+        private const val MAX_DECODED_PICTURES = 6
         private val PAGE_KEYS = setOf(
             KeyEvent.KEYCODE_PAGE_DOWN, KeyEvent.KEYCODE_PAGE_UP, KeyEvent.KEYCODE_SPACE,
             KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT, KeyEvent.KEYCODE_DPAD_UP,

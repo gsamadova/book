@@ -1,5 +1,7 @@
 package com.guny90.reader
 
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.net.Uri
 import android.util.Xml
 import org.xmlpull.v1.XmlPullParser
@@ -30,6 +32,37 @@ class EpubBook private constructor(
     fun readChapter(index: Int): String {
         val entry = zip.getEntry(spine[index]) ?: return ""
         return zip.getInputStream(entry).use { it.readBytes().toString(Charsets.UTF_8) }
+    }
+
+    /** Folder of chapter [index] inside the zip, for resolving its links and pictures. */
+    fun chapterDir(index: Int) = spine[index].substringBeforeLast('/', "")
+
+    private val pictureSizes = HashMap<String, IntArray?>()
+
+    /** Pixel size of a picture, read from its header only; null if missing or unreadable. */
+    fun pictureSize(path: String): IntArray? = pictureSizes.getOrPut(path) {
+        val entry = zip.getEntry(path) ?: return@getOrPut null
+        val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        zip.getInputStream(entry).use { BitmapFactory.decodeStream(it, null, options) }
+        if (options.outWidth > 0 && options.outHeight > 0) intArrayOf(options.outWidth, options.outHeight) else null
+    }
+
+    /**
+     * Decodes a picture at exactly [width] x [height] (its aspect ratio already applied by the
+     * caller), reading no more pixels than needed. Null if it can't be decoded.
+     */
+    fun decodePicture(path: String, width: Int, height: Int): Bitmap? {
+        val size = pictureSize(path) ?: return null
+        var sample = 1
+        while (size[0] / (sample * 2) >= width && size[1] / (sample * 2) >= height) sample *= 2
+        val options = BitmapFactory.Options().apply {
+            inSampleSize = sample
+            inPreferredConfig = Bitmap.Config.RGB_565 // half the memory; pictures with transparency still get alpha
+        }
+        val entry = zip.getEntry(path) ?: return null
+        val decoded = zip.getInputStream(entry).use { BitmapFactory.decodeStream(it, null, options) } ?: return null
+        if (decoded.width == width && decoded.height == height) return decoded
+        return Bitmap.createScaledBitmap(decoded, width, height, true).also { if (it !== decoded) decoded.recycle() }
     }
 
     override fun close() = zip.close()
@@ -164,7 +197,7 @@ class EpubBook private constructor(
         }
 
         /** Resolves an href relative to a directory inside the zip ("a/b" + "../c.html" -> "a/c.html"). */
-        private fun resolve(dir: String, href: String): String {
+        fun resolve(dir: String, href: String): String {
             val fragment = href.substringAfter('#', "")
             val parts = ArrayList<String>()
             if (dir.isNotEmpty()) parts.addAll(dir.split('/'))

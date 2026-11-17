@@ -2,14 +2,19 @@ package com.guny90.reader
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.ColorMatrix
+import android.graphics.ColorMatrixColorFilter
 import android.graphics.Paint
+import android.graphics.RectF
 import android.graphics.Typeface
 import android.text.Layout
 import android.text.SpannableStringBuilder
 import android.text.Spanned
 import android.text.style.LineHeightSpan
+import android.text.style.ReplacementSpan
 import android.text.StaticLayout
 import android.text.TextPaint
 import android.text.TextUtils
@@ -39,12 +44,32 @@ class Pages(val layout: StaticLayout, private val starts: IntArray) {
         /** Extra space after each paragraph, as a fraction of the text size (menu choices). */
         val PARAGRAPH_SPACINGS = listOf("None" to 0f, "Small" to 0.35f, "Medium" to 0.7f, "Large" to 1.1f)
 
+        /**
+         * [pictureSize] (null: pictures off) gives a picture's pixel size; it is then drawn in place
+         * of its "[image]" placeholder, scaled to fit the page. [pixelScale]: screen pixels per picture pixel.
+         */
         fun paginate(
             chapter: CharSequence, width: Int, height: Int, textSizePx: Float, paragraphSpacing: Float,
+            pictureSize: ((String) -> IntArray?)? = null, pixelScale: Float = 1f,
         ): Pages {
             val text = SpannableStringBuilder(chapter)
             val gap = (paragraphSpacing * textSizePx).toInt()
             if (gap > 0) text.setSpan(ParagraphGap(gap), 0, text.length, Spanned.SPAN_INCLUSIVE_INCLUSIVE)
+            if (pictureSize != null) {
+                val pad = (0.3f * textSizePx).toInt()
+                // A picture is one line, so it must fit on one page together with its spacing.
+                val maxHeight = ((height - 2 * pad - gap * LINE_SPACING) / LINE_SPACING).toInt() - 2
+                for (ref in text.getSpans(0, text.length, HtmlText.ImageRef::class.java)) {
+                    val size = pictureSize(ref.path) ?: continue
+                    val w = size[0] * pixelScale
+                    val h = size[1] * pixelScale
+                    val fit = minOf(1f, width / w, maxHeight / h)
+                    val picture = PictureSpan(
+                        ref.path, (w * fit).toInt().coerceAtLeast(1), (h * fit).toInt().coerceAtLeast(1), width, pad,
+                    )
+                    text.setSpan(picture, text.getSpanStart(ref), text.getSpanEnd(ref), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                }
+            }
 
             val paint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
                 color = Color.BLACK
@@ -54,7 +79,7 @@ class Pages(val layout: StaticLayout, private val starts: IntArray) {
             }
             val layout = StaticLayout.Builder.obtain(text, 0, text.length, paint, width)
                 .setAlignment(Layout.Alignment.ALIGN_NORMAL)
-                .setLineSpacing(0f, 1.15f)
+                .setLineSpacing(0f, LINE_SPACING)
                 .setIncludePad(false)
                 .setBreakStrategy(Layout.BREAK_STRATEGY_SIMPLE)
                 .setHyphenationFrequency(Layout.HYPHENATION_FREQUENCY_NONE)
@@ -71,6 +96,16 @@ class Pages(val layout: StaticLayout, private val starts: IntArray) {
             }
             return Pages(layout, starts.toIntArray())
         }
+
+        const val LINE_SPACING = 1.15f
+    }
+
+    /** Pictures on [page] that still need decoding (see [PictureSpan.bitmap]). */
+    fun picturesToLoad(page: Int): List<PictureSpan> {
+        val text = layout.text as? Spanned ?: return emptyList()
+        val start = layout.getLineStart(startLine(page))
+        val end = layout.getLineEnd(endLine(page) - 1)
+        return text.getSpans(start, end, PictureSpan::class.java).filter { it.bitmap == null && !it.failed }
     }
 
     /** Adds [gap] px below the last line of every paragraph (but not after a <br> line break). */
@@ -82,6 +117,56 @@ class Pages(val layout: StaticLayout, private val starts: IntArray) {
             if (text is Spanned && text.getSpans(end - 1, end, HtmlText.LineBreak::class.java).isNotEmpty()) return
             fm.descent += gap
             fm.bottom += gap
+        }
+    }
+}
+
+/**
+ * A picture drawn in place of its "[image]" placeholder: one line of [width] x [height] pixels
+ * (plus [pad] above and below), centered in a line of [lineWidth]. The bitmap is decoded before
+ * the page is shown; until then (or if it fails) a frame is drawn.
+ */
+class PictureSpan(
+    val path: String,
+    val width: Int,
+    val height: Int,
+    private val lineWidth: Int,
+    private val pad: Int,
+) : ReplacementSpan() {
+    @Volatile var bitmap: Bitmap? = null
+    @Volatile var failed = false
+
+    override fun getSize(paint: Paint, text: CharSequence?, start: Int, end: Int, fm: Paint.FontMetricsInt?): Int {
+        if (fm != null) {
+            // The layout multiplies line heights by its line spacing; divide so the line is just the picture.
+            val lineHeight = ((height + 2 * pad) / Pages.LINE_SPACING).toInt()
+            fm.ascent = -lineHeight
+            fm.top = -lineHeight
+            fm.descent = 0
+            fm.bottom = 0
+        }
+        return lineWidth
+    }
+
+    override fun draw(
+        canvas: Canvas, text: CharSequence?, start: Int, end: Int, x: Float, top: Int, y: Int, bottom: Int, paint: Paint,
+    ) {
+        val left = x + (lineWidth - width) / 2f
+        val box = RectF(left, (top + pad).toFloat(), left + width, (top + pad + height).toFloat())
+        val bmp = bitmap
+        if (bmp != null) canvas.drawBitmap(bmp, null, box, picturePaint)
+        else canvas.drawRect(box, framePaint)
+    }
+
+    companion object {
+        /** Gray: an e-ink screen shows nothing else anyway, and colors would dither unevenly. */
+        val picturePaint = Paint(Paint.FILTER_BITMAP_FLAG).apply {
+            colorFilter = ColorMatrixColorFilter(ColorMatrix().apply { setSaturation(0f) })
+        }
+        private val framePaint = Paint().apply {
+            color = Color.BLACK
+            style = Paint.Style.STROKE
+            strokeWidth = 1f
         }
     }
 }
@@ -99,6 +184,8 @@ class PageView(context: Context) : View(context) {
      * On release: the selected text, whether it is one word, and its vertical center on screen.
      */
     var onTextSelected: ((text: String, singleWord: Boolean, centerY: Int) -> Unit)? = null
+    /** Long-press on a picture (instead of selecting text). */
+    var onPictureLongPress: ((PictureSpan) -> Unit)? = null
     /** Called after layout; the activity re-paginates if the text area size changed. */
     var onTextAreaLaidOut: (() -> Unit)? = null
 
@@ -145,7 +232,9 @@ class PageView(context: Context) : View(context) {
     private var anchor: IntRange? = null // the long-pressed word; the selection always includes it
     private val longPressAction = Runnable {
         longPressed = true
-        selecting = startSelection(downX, downY)
+        val picture = pictureAt(downX, downY)
+        if (picture != null) onPictureLongPress?.invoke(picture)
+        else selecting = startSelection(downX, downY)
     }
 
     init {
@@ -375,6 +464,17 @@ class PageView(context: Context) : View(context) {
         val bottom = layout.getLineTop(p.endLine(page))
         val ly = ((y - paddingTop - margin).toInt() + top).coerceIn(top, bottom - 1)
         return layout.getOffsetForHorizontal(layout.getLineForVertical(ly), x - paddingLeft - margin)
+    }
+
+    private fun pictureAt(x: Float, y: Float): PictureSpan? {
+        val p = pages ?: return null
+        val layout = p.layout
+        val text = layout.text as? Spanned ?: return null
+        val top = layout.getLineTop(p.startLine(page))
+        val ly = (y - paddingTop - margin).toInt() + top
+        if (ly < top || ly >= layout.getLineTop(p.endLine(page))) return null
+        val line = layout.getLineForVertical(ly)
+        return text.getSpans(layout.getLineStart(line), layout.getLineEnd(line), PictureSpan::class.java).firstOrNull()
     }
 
     /** The word under (x, y) on the current page, as a character range of the chapter text. */
