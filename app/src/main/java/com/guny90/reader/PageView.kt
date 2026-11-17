@@ -186,6 +186,8 @@ class PageView(context: Context) : View(context) {
     enum class Zone { PREV, MENU, NEXT }
 
     var onTap: ((Zone) -> Unit)? = null
+    /** Tap on a link (instead of [onTap]). */
+    var onLinkTap: ((HtmlText.Link) -> Unit)? = null
     /**
      * Long-press selects a word; sliding the finger (without lifting) extends the selection.
      * On release: the selected text, whether it is one word, and its vertical center on screen.
@@ -534,6 +536,12 @@ class PageView(context: Context) : View(context) {
                     selecting = false
                     if (image != null) finishPdfSelection() else finishSelection()
                 } else if (pressing && !longPressed) {
+                    val link = linkAt(downX, downY)
+                    if (link != null) {
+                        pressing = false
+                        onLinkTap?.invoke(link)
+                        return true
+                    }
                     val zone = when {
                         event.x < width / 3f -> Zone.PREV
                         event.x > width * 2f / 3f -> Zone.NEXT
@@ -616,6 +624,44 @@ class PageView(context: Context) : View(context) {
         val ly = ((y - paddingTop - margin).toInt() + top).coerceIn(top, bottom - 1)
         return layout.getOffsetForHorizontal(layout.getLineForVertical(ly), x - paddingLeft - margin)
     }
+
+    /**
+     * The link under (x, y) on the current page, or the nearest one within a finger's width:
+     * note markers like "1" are much smaller than a fingertip.
+     */
+    private fun linkAt(x: Float, y: Float): HtmlText.Link? {
+        val p = pages ?: return null
+        val layout = p.layout
+        val text = layout.text as? Spanned ?: return null
+        val firstLine = p.startLine(page)
+        val lastLine = p.endLine(page) - 1
+        val pageStart = layout.getLineStart(firstLine)
+        val pageEnd = layout.getLineEnd(lastLine)
+        val links = text.getSpans(pageStart, pageEnd, HtmlText.Link::class.java)
+        if (links.isEmpty()) return null
+        val lx = x - paddingLeft - margin
+        val ly = y - paddingTop - margin + layout.getLineTop(firstLine)
+        var best: HtmlText.Link? = null
+        var bestDistance = Float.MAX_VALUE
+        for (link in links) {
+            val start = maxOf(text.getSpanStart(link), pageStart)
+            val end = minOf(text.getSpanEnd(link), pageEnd)
+            if (start >= end) continue
+            forEachLinePart(layout, start until end) { line, left, right ->
+                val top = layout.getLineTop(line).toFloat()
+                val bottom = layout.getLineBottom(line).toFloat()
+                val dx = if (lx < left) left - lx else if (lx > right) lx - right else 0f
+                val dy = if (ly < top) top - ly else if (ly > bottom) ly - bottom else 0f
+                if (dx <= linkSlop && dy <= linkSlop / 2 && dx + dy < bestDistance) {
+                    best = link
+                    bestDistance = dx + dy
+                }
+            }
+        }
+        return best
+    }
+
+    private val linkSlop = 14 * density
 
     private fun pictureAt(x: Float, y: Float): PictureSpan? {
         val p = pages ?: return null

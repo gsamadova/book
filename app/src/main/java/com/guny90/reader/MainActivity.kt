@@ -79,6 +79,12 @@ class MainActivity : Activity() {
     private var bookKey = ""
     private var chapter = 0
     private var chapterText: CharSequence? = null
+    /** Link targets (ids) of [chapterText]: their character offsets. */
+    private var chapterAnchors: Map<String, Int> = emptyMap()
+    /** Where to return to after following links (chapter, offset), newest last. */
+    private val backStack = ArrayList<Pair<Int, Int>>()
+    /** The chapter last read for showing a note from another chapter (worker thread only). */
+    private var noteChapter: Pair<Int, HtmlText.Chapter>? = null
     private var pages: Pages? = null
     private var page = 0
     private var pendingOffset = 0
@@ -167,6 +173,7 @@ class MainActivity : Activity() {
         pageView.onTextAreaLaidOut = ::onTextAreaLaidOut
         pageView.onTextSelected = ::onTextSelected
         pageView.onPictureLongPress = ::openPicture
+        pageView.onLinkTap = { link -> if (speaking) pauseReading() else followLink(link) }
         pageView.onNoWords = {
             Toast.makeText(this, "No text to select on this page (it may be a scanned picture).", Toast.LENGTH_SHORT).show()
         }
@@ -325,6 +332,11 @@ class MainActivity : Activity() {
     private fun closeCurrentBook() {
         stopReadingAloud()
         pushPosition() // the book being replaced
+        backStack.clear()
+        updateBackHandler()
+        chapterAnchors = emptyMap()
+        val oldNotes = noteChapter
+        if (oldNotes != null) worker.execute { if (noteChapter === oldNotes) noteChapter = null }
         val oldBook = book
         val oldPdf = pdf
         val oldWords = pdfWords
@@ -395,15 +407,16 @@ class MainActivity : Activity() {
     // ---------------------------------------------------------------- layout & paging
 
     /**
-     * Loads (or re-paginates) a chapter and shows the page containing [offset].
-     * Int.MAX_VALUE means "last page" (used when paging backwards).
+     * Loads (or re-paginates) a chapter and shows the page containing [offset], or the id
+     * [anchor] if the chapter has it. Int.MAX_VALUE means "last page" (used when paging backwards).
      */
-    private fun loadChapter(index: Int, offset: Int) {
+    private fun loadChapter(index: Int, offset: Int, anchor: String? = null) {
         val b = book ?: return
         val target = index.coerceIn(0, b.spine.size - 1)
         val w = pageView.textWidth
         val h = pageView.textHeight
         val cached = if (target == chapter) chapterText else null
+        val cachedAnchors = chapterAnchors
         if (cached == null && spokenRange != null) {
             spokenRange = null // offsets of another chapter
             pageView.setSpoken(null, redraw = false)
@@ -427,17 +440,21 @@ class MainActivity : Activity() {
         val pixelScale = resources.displayMetrics.density
         worker.execute {
             try {
-                val text = cached ?: HtmlText.toText(b.readChapter(target), b.chapterDir(target))
+                val content = if (cached != null) HtmlText.Chapter(cached, cachedAnchors)
+                else HtmlText.toText(b.readChapter(target), b.spine[target])
+                val text = content.text
+                val at = anchor?.let { findAnchor(content.anchors, it) } ?: offset
                 val pictureSize: ((String) -> IntArray?)? = if (pictures) b::pictureSize else null
                 val result = Pages.paginate(text, w, h, textPx, spacing, pictureSize, pixelScale)
                 mainHandler.post {
                     if (id != jobId) return@post
                     chapterText = text
+                    chapterAnchors = content.anchors
                     pages = result
                     loading = false
                     // While reading aloud, a re-layout (e.g. the bar appearing) keeps the spoken sentence in view.
                     val spoken = spokenRange
-                    val showAt = if (speaking && !speakAfterLoad && spoken != null) spoken.first else offset
+                    val showAt = if (speaking && !speakAfterLoad && spoken != null) spoken.first else at
                     showPage(result.pageForOffset(showAt))
                     if (speakAfterLoad) {
                         speakAfterLoad = false
@@ -671,6 +688,9 @@ class MainActivity : Activity() {
                 actions += "Colors: ${pictureColorsName()}" to { togglePictureColors(); showMenu() }
             }
             b != null -> {
+                backStack.lastOrNull()?.let { (ch, _) ->
+                    actions += "Back to where you were (ch ${ch + 1})" to ::goBack
+                }
                 actions += "Contents" to ::showContents
                 actions += if (readingAloud) "Stop reading aloud" to ::stopReadingAloud
                 else "Read aloud" to ::startReadingAloud
@@ -756,7 +776,133 @@ class MainActivity : Activity() {
         val entries = b.toc.ifEmpty {
             b.spine.indices.map { EpubBook.TocEntry("Chapter ${it + 1}", it) }
         }
-        showList("Contents", entries.map { it.title }) { loadChapter(entries[it].spineIndex, 0) }
+        showList("Contents", entries.map { it.title }) {
+            val entry = entries[it]
+            val p = pages
+            val offset = entry.anchor?.let { a -> findAnchor(chapterAnchors, a) }
+            // Same chapter, already laid out: just turn to the page.
+            if (entry.spineIndex == chapter && p != null && !loading && offset != null) showPage(p.pageForOffset(offset))
+            else loadChapter(entry.spineIndex, 0, entry.anchor)
+        }
+    }
+
+    // ---------------------------------------------------------------- links
+
+    private fun followLink(link: HtmlText.Link) {
+        when (link.kind) {
+            HtmlText.Link.Kind.EXTERNAL -> openExternalLink(link.target)
+            HtmlText.Link.Kind.NOTE -> showNote(link.target)
+            HtmlText.Link.Kind.INTERNAL -> jumpTo(link.target)
+        }
+    }
+
+    /** Asks first: a stray tap shouldn't take you out of the book. */
+    private fun openExternalLink(url: String) {
+        showPlain(
+            AlertDialog.Builder(this)
+                .setTitle("Open in browser?")
+                .setMessage(url)
+                .setPositiveButton("Open") { _, _ ->
+                    try {
+                        startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                    } catch (e: ActivityNotFoundException) {
+                        Toast.makeText(this, "No app on this device can open this link.", Toast.LENGTH_SHORT).show()
+                    }
+                }
+                .setNegativeButton("Cancel", null)
+        )
+    }
+
+    /** An id from a link's #fragment, as written or percent-decoded. */
+    private fun findAnchor(anchors: Map<String, Int>, id: String): Int? = anchors[id] ?: anchors[Uri.decode(id)]
+
+    /** Goes to [target] ("path#id") in the book; Back returns here. */
+    private fun jumpTo(target: String) {
+        val b = book ?: return
+        val index = b.spine.indexOf(target.substringBefore('#'))
+        if (index < 0) {
+            Toast.makeText(this, "This link points to a part of the book that can't be shown.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val anchor = target.substringAfter('#', "").ifEmpty { null }
+        backStack += chapter to currentOffset()
+        if (backStack.size > MAX_BACK) backStack.removeAt(0)
+        updateBackHandler()
+        val p = pages
+        val offset = anchor?.let { findAnchor(chapterAnchors, it) }
+        if (index == chapter && p != null && !loading) showPage(p.pageForOffset(offset ?: 0))
+        else loadChapter(index, 0, anchor)
+    }
+
+    /** Returns to where the last followed link was tapped. */
+    private fun goBack() {
+        val (ch, offset) = backStack.removeLastOrNull() ?: return
+        updateBackHandler()
+        if (speaking) pauseReading()
+        val p = pages
+        if (ch == chapter && p != null && !loading) showPage(p.pageForOffset(offset)) else loadChapter(ch, offset)
+    }
+
+    /** The system Back gesture goes back along followed links while there are any, else as usual. */
+    private val backCallback: Any? by lazy {
+        if (Build.VERSION.SDK_INT >= 33) android.window.OnBackInvokedCallback { goBack() } else null
+    }
+
+    private fun updateBackHandler() {
+        if (Build.VERSION.SDK_INT < 33) return
+        val callback = backCallback as android.window.OnBackInvokedCallback
+        onBackInvokedDispatcher.unregisterOnBackInvokedCallback(callback)
+        if (backStack.isNotEmpty()) {
+            onBackInvokedDispatcher.registerOnBackInvokedCallback(android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT, callback)
+        }
+    }
+
+    @Deprecated("Used below Android 13 only; newer versions use updateBackHandler")
+    override fun onBackPressed() {
+        if (backStack.isNotEmpty()) goBack() else @Suppress("DEPRECATION") super.onBackPressed()
+    }
+
+    /**
+     * Shows the footnote [target] points to in a popup, without leaving the page. If the note
+     * can't be found, goes there instead.
+     */
+    private fun showNote(target: String) {
+        val b = book ?: return
+        val index = b.spine.indexOf(target.substringBefore('#'))
+        val anchor = target.substringAfter('#', "")
+        if (index < 0 || anchor.isEmpty()) return jumpTo(target)
+        val current = chapterText
+        if (index == chapter && current != null) {
+            val offset = findAnchor(chapterAnchors, anchor) ?: return jumpTo(target)
+            return showNotePopup(HtmlText.noteAt(HtmlText.Chapter(current, chapterAnchors), offset), target)
+        }
+        if (speaking) pauseReading()
+        val currentBook = b
+        worker.execute {
+            val note = try {
+                val cachedNotes = noteChapter
+                val content = if (cachedNotes != null && cachedNotes.first == index) cachedNotes.second
+                else HtmlText.toText(b.readChapter(index), b.spine[index]).also { noteChapter = index to it }
+                findAnchor(content.anchors, anchor)?.let { HtmlText.noteAt(content, it) }
+            } catch (e: Exception) {
+                null
+            }
+            mainHandler.post {
+                if (book !== currentBook) return@post
+                if (note != null) showNotePopup(note, target) else jumpTo(target)
+            }
+        }
+    }
+
+    private fun showNotePopup(note: CharSequence, target: String) {
+        if (note.isBlank()) return jumpTo(target)
+        showPlain(
+            AlertDialog.Builder(this)
+                .setTitle("Note")
+                .setMessage(note)
+                .setPositiveButton("Close", null)
+                .setNeutralButton("Go to note") { _, _ -> jumpTo(target) }
+        )
     }
 
     private fun showGoToPage() {
@@ -1105,7 +1251,12 @@ class MainActivity : Activity() {
 
     private fun speakFrom(offset: Int) {
         val text = chapterText ?: return
-        speech().start(text, offset, bookLocale())
+        // Footnote markers ("[1]") would be read out as numbers: blank them, keeping the offsets.
+        val markers = HtmlText.noteMarkers(text)
+        val speakable = if (markers.isEmpty()) text else StringBuilder(text).apply {
+            for (r in markers) for (i in r) setCharAt(i, ' ')
+        }
+        speech().start(speakable, offset, bookLocale())
     }
 
     private fun pauseReading() {
@@ -1461,6 +1612,8 @@ class MainActivity : Activity() {
         private const val REQUEST_DICTIONARY = 2
         private const val GOOGLE_TRANSLATE = "com.google.android.apps.translate"
         private const val MAX_DECODED_PICTURES = 6
+        /** Followed links remembered for Back. */
+        private const val MAX_BACK = 20
         private val PAGE_KEYS = setOf(
             KeyEvent.KEYCODE_PAGE_DOWN, KeyEvent.KEYCODE_PAGE_UP, KeyEvent.KEYCODE_SPACE,
             KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT, KeyEvent.KEYCODE_DPAD_UP,

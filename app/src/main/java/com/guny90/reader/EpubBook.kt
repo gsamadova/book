@@ -27,15 +27,13 @@ class EpubBook private constructor(
     val toc: List<TocEntry>,
 ) : Closeable {
 
-    data class TocEntry(val title: String, val spineIndex: Int)
+    /** [anchor]: the id it points to inside the chapter, if any (null: the chapter's start). */
+    data class TocEntry(val title: String, val spineIndex: Int, val anchor: String? = null)
 
     fun readChapter(index: Int): String {
         val entry = zip.getEntry(spine[index]) ?: return ""
         return zip.getInputStream(entry).use { it.readBytes().toString(Charsets.UTF_8) }
     }
-
-    /** Folder of chapter [index] inside the zip, for resolving its links and pictures. */
-    fun chapterDir(index: Int) = spine[index].substringBeforeLast('/', "")
 
     private val pictureSizes = HashMap<String, IntArray?>()
 
@@ -193,7 +191,8 @@ class EpubBook private constructor(
 
         private fun addTocEntry(out: MutableList<TocEntry>, label: String?, path: String, spine: List<String>) {
             val index = spine.indexOf(path.substringBefore('#'))
-            if (index >= 0) out.add(TocEntry(label?.ifEmpty { null } ?: "Chapter ${index + 1}", index))
+            val anchor = path.substringAfter('#', "").ifEmpty { null }
+            if (index >= 0) out.add(TocEntry(label?.ifEmpty { null } ?: "Chapter ${index + 1}", index, anchor))
         }
 
         /** Resolves an href relative to a directory inside the zip ("a/b" + "../c.html" -> "a/c.html"). */
