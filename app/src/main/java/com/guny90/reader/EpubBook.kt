@@ -18,6 +18,8 @@ import java.util.zip.ZipFile
 class EpubBook private constructor(
     private val zip: ZipFile,
     val title: String,
+    /** dc:language, e.g. "pl" or "en-GB"; null if the book doesn't say. */
+    val language: String?,
     /** Zip entry paths of the chapters, in reading order. */
     val spine: List<String>,
     val toc: List<TocEntry>,
@@ -53,6 +55,7 @@ class EpubBook private constructor(
             val manifest = HashMap<String, Item>()
             val spineIds = ArrayList<String>()
             var title = ""
+            var language: String? = null
             var ncxId: String? = null
 
             zip.stream(opfPath).use { input ->
@@ -61,6 +64,7 @@ class EpubBook private constructor(
                     if (p.eventType != XmlPullParser.START_TAG) continue
                     when (localName(p.name)) {
                         "title" -> if (title.isEmpty()) title = p.nextText().trim()
+                        "language" -> if (language == null) language = p.nextText().trim().ifEmpty { null }
                         "item" -> {
                             val id = p.attr("id") ?: continue
                             manifest[id] = Item(
@@ -93,7 +97,7 @@ class EpubBook private constructor(
                 emptyList() // a broken TOC should never prevent reading
             }
 
-            return EpubBook(zip, title.ifEmpty { "Untitled" }, spine, toc)
+            return EpubBook(zip, title.ifEmpty { "Untitled" }, language, spine, toc)
         }
 
         private fun findRootFile(input: InputStream): String? {

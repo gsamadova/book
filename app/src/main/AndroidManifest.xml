@@ -7,6 +7,10 @@
     <!-- Android 11+ hides other apps unless declared: needed to detect Google Translate. -->
     <queries>
         <package android:name="com.google.android.apps.translate" />
+        <!-- Text-to-speech engines (read aloud) -->
+        <intent>
+            <action android:name="android.intent.action.TTS_SERVICE" />
+        </intent>
     </queries>
 
     <application

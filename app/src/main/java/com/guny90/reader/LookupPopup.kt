@@ -26,6 +26,8 @@ class LookupPopup(
     wordCenterY: Int,
     private val onSuggestion: (String) -> Unit,
     private val onChangeDictionary: () -> Unit,
+    /** Says the shown word aloud; null hides the Speak button (no text-to-speech engine). */
+    onSpeak: ((String) -> Unit)?,
     /** Null hides the Translate button (Google Translate not installed). */
     onTranslate: (() -> Unit)?,
     onCopy: () -> Unit,
@@ -71,6 +73,9 @@ class LookupPopup(
         }
         // Row 1: which dictionary. Row 2: the other actions, so none needs an extra menu.
         val actions = ArrayList<TextView>()
+        if (onSpeak != null) actions += button("Speak").apply {
+            setOnClickListener { onSpeak(titleView.text.toString()) } // stays open: listen again or read on
+        }
         if (onTranslate != null) actions += button("Translate").apply {
             setOnClickListener { dialog.dismiss(); onTranslate() }
         }
@@ -80,7 +85,7 @@ class LookupPopup(
             orientation = LinearLayout.HORIZONTAL
             for ((i, b) in actions.withIndex()) {
                 addView(b, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply {
-                    if (i > 0) marginStart = dp(12)
+                    if (i > 0) marginStart = dp(8)
                 })
             }
         }
@@ -149,7 +154,8 @@ class LookupPopup(
         setTextColor(Color.BLACK)
         textSize = 16f
         gravity = Gravity.CENTER
-        setPadding(dp(14), dp(10), dp(14), dp(10))
+        setPadding(dp(6), dp(10), dp(6), dp(10))
+        maxLines = 1
         background = GradientDrawable().apply {
             setColor(Color.WHITE)
             setStroke(dp(1), Color.BLACK)

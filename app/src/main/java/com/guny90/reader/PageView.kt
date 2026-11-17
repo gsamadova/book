@@ -108,6 +108,8 @@ class PageView(context: Context) : View(context) {
     private var statusRight = ""
     private var message: String? = null
     private var selection: IntRange? = null
+    /** The sentence being read aloud (chapter offsets), underlined. */
+    private var spoken: IntRange? = null
 
     private val density = resources.displayMetrics.density
     private val margin = (16 * density).toInt()
@@ -125,6 +127,10 @@ class PageView(context: Context) : View(context) {
     private val selectionPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.BLACK
         style = Paint.Style.STROKE
+        strokeWidth = 2 * density
+    }
+    private val underlinePaint = Paint().apply {
+        color = Color.BLACK
         strokeWidth = 2 * density
     }
 
@@ -167,6 +173,13 @@ class PageView(context: Context) : View(context) {
         invalidate()
     }
 
+    /** Underlines [range] (or nothing). With [redraw] false the change shows on the next redraw. */
+    fun setSpoken(range: IntRange?, redraw: Boolean = true) {
+        if (range == spoken) return
+        spoken = range
+        if (redraw) invalidate()
+    }
+
     fun clearSelection() {
         if (selection != null) {
             selection = null
@@ -192,6 +205,7 @@ class PageView(context: Context) : View(context) {
         canvas.translate((paddingLeft + margin).toFloat(), (paddingTop + margin - top).toFloat())
         canvas.clipRect(0, top, layout.width, bottom)
         layout.draw(canvas) // only draws lines inside the clip
+        spoken?.let { drawUnderline(canvas, layout, it) }
         selection?.let { sel -> drawSelection(canvas, layout, sel) }
         canvas.restore()
 
@@ -208,22 +222,40 @@ class PageView(context: Context) : View(context) {
 
     /** One outline box per line, from the first to the last selected letter (no gray fill). */
     private fun drawSelection(canvas: Canvas, layout: Layout, sel: IntRange) {
-        val text = layout.text
         val descent = layout.paint.fontMetricsInt.descent
-        for (line in layout.getLineForOffset(sel.first)..layout.getLineForOffset(sel.last)) {
-            var start = maxOf(sel.first, layout.getLineStart(line))
-            var end = minOf(sel.last + 1, layout.getLineEnd(line))
+        val pad = selectionPaint.strokeWidth
+        forEachLinePart(layout, sel) { line, left, right ->
+            canvas.drawRect(
+                left - pad, layout.getLineTop(line).toFloat(),
+                right + pad, (layout.getLineBaseline(line) + descent).toFloat() + pad,
+                selectionPaint,
+            )
+        }
+    }
+
+    /** A plain line under each line of [range]: thin enough to need only a light e-ink refresh. */
+    private fun drawUnderline(canvas: Canvas, layout: Layout, range: IntRange) {
+        val gap = layout.paint.fontMetricsInt.descent * 0.6f
+        forEachLinePart(layout, range) { line, left, right ->
+            val y = layout.getLineBaseline(line) + gap
+            canvas.drawLine(left, y, right, y, underlinePaint)
+        }
+    }
+
+    /** Calls [action] with the horizontal extent of [range] on each of its lines, without edge spaces. */
+    private inline fun forEachLinePart(layout: Layout, range: IntRange, action: (line: Int, left: Float, right: Float) -> Unit) {
+        val text = layout.text
+        val last = range.last.coerceAtMost(text.length - 1)
+        if (range.first > last) return
+        for (line in layout.getLineForOffset(range.first)..layout.getLineForOffset(last)) {
+            var start = maxOf(range.first, layout.getLineStart(line))
+            var end = minOf(last + 1, layout.getLineEnd(line))
             while (start < end && text[start].isWhitespace()) start++
             while (end > start && text[end - 1].isWhitespace()) end--
             if (start >= end) continue
             val left = layout.getPrimaryHorizontal(start)
             val right = if (end >= layout.getLineEnd(line)) layout.getLineRight(line) else layout.getPrimaryHorizontal(end)
-            val pad = selectionPaint.strokeWidth
-            canvas.drawRect(
-                minOf(left, right) - pad, layout.getLineTop(line).toFloat(),
-                maxOf(left, right) + pad, (layout.getLineBaseline(line) + descent).toFloat() + pad,
-                selectionPaint,
-            )
+            action(line, minOf(left, right), maxOf(left, right))
         }
     }
 

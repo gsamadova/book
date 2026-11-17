@@ -7,16 +7,25 @@ import android.content.ClipboardManager
 import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.SharedPreferences
+import android.graphics.Color
+import android.graphics.drawable.GradientDrawable
+import android.media.AudioManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.provider.OpenableColumns
+import android.speech.tts.TextToSpeech
 import android.util.TypedValue
 import android.text.InputType
 import android.text.format.DateUtils
+import android.view.Gravity
 import android.view.KeyEvent
+import android.view.View
+import android.view.ViewGroup.LayoutParams.MATCH_PARENT
+import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+import android.view.WindowManager
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -28,6 +37,7 @@ import com.guny90.reader.dict.Dictionaries
 import com.guny90.reader.sync.KoSync
 import com.guny90.reader.sync.PositionSync
 import java.io.File
+import java.util.Locale
 import java.util.concurrent.Executors
 
 /**
@@ -76,6 +86,23 @@ class MainActivity : Activity() {
     private var lookupId = 0
     private var popupDict: Dictionaries.Info? = null
 
+    // Read aloud
+    private var speech: ReadAloud? = null
+    /** The read-aloud bar is shown (playing or paused). */
+    private var readingAloud = false
+    private var speaking = false
+    /** The sentence being (or last) read, in the current chapter. */
+    private var spokenRange: IntRange? = null
+    /** Start speaking at the top of the page once the chapter being loaded is shown. */
+    private var speakAfterLoad = false
+    private var speechRate = 1f
+    private lateinit var controls: LinearLayout
+    private lateinit var playButton: TextView
+    private lateinit var rateLabel: TextView
+    private val hasSpeechEngine by lazy {
+        packageManager.queryIntentServices(Intent(TextToSpeech.Engine.INTENT_ACTION_TTS_SERVICE), 0).isNotEmpty()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.setWindowAnimations(0)
@@ -86,10 +113,20 @@ class MainActivity : Activity() {
             ?: OneWord.DICTIONARY
         severalWordsAction = SeveralWords.entries.firstOrNull { it.name == prefs.getString("several_words_action", null) }
             ?: SeveralWords.TRANSLATE
+        speechRate = prefs.getFloat("speech_rate", 1f)
+        volumeControlStream = AudioManager.STREAM_MUSIC
 
         pageView = PageView(this)
-        setContentView(pageView)
-        ViewCompat.setOnApplyWindowInsetsListener(pageView) { v, insets ->
+        controls = buildReadAloudBar()
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.WHITE)
+            // Showing the bar shrinks the page; the chapter is re-paginated, keeping the position.
+            addView(pageView, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
+            addView(controls, MATCH_PARENT, WRAP_CONTENT)
+        }
+        setContentView(root)
+        ViewCompat.setOnApplyWindowInsetsListener(root) { v, insets ->
             val bars = insets.getInsets(
                 WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
             )
@@ -97,7 +134,8 @@ class MainActivity : Activity() {
             insets
         }
         pageView.onTap = { zone ->
-            when (zone) {
+            if (speaking) pauseReading() // any tap pauses reading aloud
+            else when (zone) {
                 PageView.Zone.PREV -> prevPage()
                 PageView.Zone.NEXT -> nextPage()
                 PageView.Zone.MENU -> showMenu()
@@ -123,6 +161,7 @@ class MainActivity : Activity() {
 
     override fun onPause() {
         super.onPause()
+        if (speaking) pauseReading() // no background reading: stops with the screen
         pushPosition() // leaving the app or screen turning off
     }
 
@@ -133,6 +172,7 @@ class MainActivity : Activity() {
         dictWorker.execute { dictionaries.closeAll() }
         dictWorker.shutdown()
         syncWorker.shutdown() // lets a pending upload finish
+        speech?.shutdown()
         super.onDestroy()
     }
 
@@ -226,6 +266,7 @@ class MainActivity : Activity() {
     }
 
     private fun setBook(newBook: EpubBook, hash: String) {
+        stopReadingAloud()
         pushPosition() // the book being replaced
         val old = book
         if (old != null) worker.execute { old.close() }
@@ -253,6 +294,10 @@ class MainActivity : Activity() {
         val w = pageView.textWidth
         val h = pageView.textHeight
         val cached = if (target == chapter) chapterText else null
+        if (cached == null && spokenRange != null) {
+            spokenRange = null // offsets of another chapter
+            pageView.setSpoken(null, redraw = false)
+        }
         chapter = target
         pendingOffset = offset
         if (w <= 0 || h <= 0) {
@@ -276,7 +321,14 @@ class MainActivity : Activity() {
                     chapterText = text
                     pages = result
                     loading = false
-                    showPage(result.pageForOffset(offset))
+                    // While reading aloud, a re-layout (e.g. the bar appearing) keeps the spoken sentence in view.
+                    val spoken = spokenRange
+                    val showAt = if (speaking && !speakAfterLoad && spoken != null) spoken.first else offset
+                    showPage(result.pageForOffset(showAt))
+                    if (speakAfterLoad) {
+                        speakAfterLoad = false
+                        if (speaking) speakFrom(result.offsetOf(page))
+                    }
                     if (syncCheckPending) {
                         syncCheckPending = false
                         checkRemotePosition()
@@ -351,6 +403,8 @@ class MainActivity : Activity() {
         actions += "Dictionaries" to ::showDictionaries
         if (b != null) {
             actions += "Contents" to ::showContents
+            actions += if (readingAloud) "Stop reading aloud" to ::stopReadingAloud
+            else "Read aloud" to ::startReadingAloud
             actions += "Larger text (${fontSp + 2})" to { changeFont(+2) }
             actions += "Smaller text (${fontSp - 2})" to { changeFont(-2) }
             actions += "Paragraph spacing: ${Pages.PARAGRAPH_SPACINGS[paragraphSpacing].first}" to ::chooseParagraphSpacing
@@ -536,6 +590,7 @@ class MainActivity : Activity() {
      * Google Translate. Falls back when the chosen tool isn't available; "Ask" shows the list.
      */
     private fun onTextSelected(text: String, singleWord: Boolean, centerY: Int) {
+        if (speaking) pauseReading()
         val hasDictionary = dictionaries.list().isNotEmpty()
         val translate = translateIntent(text)
         if (singleWord) {
@@ -674,6 +729,7 @@ class MainActivity : Activity() {
             onChangeDictionary = {
                 chooseDictionary(dictionaries.list()) { chosen -> lookUp(chosen, word, centerY) }
             },
+            onSpeak = if (hasSpeechEngine) { shown -> speech().speakWord(shown, bookLocale()) } else null,
             onTranslate = translateIntent(word)?.let { intent -> { openTranslate(intent) } },
             onCopy = { copyText(word) },
             onDismiss = {
@@ -683,6 +739,202 @@ class MainActivity : Activity() {
         )
         popup = newPopup
         newPopup.show(content)
+    }
+
+    // ---------------------------------------------------------------- read aloud
+
+    private fun speech(): ReadAloud = speech ?: ReadAloud(this, speechListener).also {
+        it.rate = speechRate
+        speech = it
+    }
+
+    /** Voice language: the book's own (dc:language), else the device's. */
+    private fun bookLocale(): Locale =
+        book?.language?.let { Locale.forLanguageTag(it.replace('_', '-')) }?.takeIf { it.language.isNotEmpty() }
+            ?: Locale.getDefault()
+
+    private fun startReadingAloud() {
+        if (!hasSpeechEngine) return showMessage("Read aloud", ReadAloud.NO_ENGINE)
+        if (pages == null) return
+        readingAloud = true
+        spokenRange = null
+        controls.visibility = View.VISIBLE
+        resumeReading()
+    }
+
+    /** Play: continues the current sentence if it's on this page, else starts at the top of the page. */
+    private fun resumeReading() {
+        val p = pages ?: return
+        speaking = true
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) // the screen timeout would stop it
+        updateReadAloudBar()
+        if (loading) {
+            speakAfterLoad = true
+            return
+        }
+        val spoken = spokenRange
+        speakFrom(if (spoken != null && p.pageForOffset(spoken.first) == page) spoken.first else p.offsetOf(page))
+    }
+
+    private fun speakFrom(offset: Int) {
+        val text = chapterText ?: return
+        speech().start(text, offset, bookLocale())
+    }
+
+    private fun pauseReading() {
+        speaking = false
+        speakAfterLoad = false
+        mainHandler.removeCallbacks(restartAtNewRate)
+        speech?.stop()
+        window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        updateReadAloudBar()
+    }
+
+    private fun stopReadingAloud() {
+        if (!readingAloud) return
+        pauseReading()
+        readingAloud = false
+        spokenRange = null
+        pageView.setSpoken(null)
+        controls.visibility = View.GONE
+    }
+
+    private val speechListener = object : ReadAloud.Listener {
+        override fun onSentence(range: IntRange) {
+            if (!speaking) return
+            spokenRange = range
+            turnPageTo(range.first)
+            pageView.setSpoken(range)
+        }
+
+        override fun onProgress(offset: Int) {
+            if (speaking) turnPageTo(offset) // a sentence continuing on the next page
+        }
+
+        override fun onChapterEnd() {
+            if (!speaking) return
+            val b = book ?: return
+            if (chapter + 1 < b.spine.size) {
+                speakAfterLoad = true
+                loadChapter(chapter + 1, 0)
+            } else {
+                stopReadingAloud()
+                showMessage("Read aloud", "End of the book.")
+            }
+        }
+
+        override fun onError(message: String) {
+            pauseReading()
+            showMessage("Read aloud", message)
+        }
+
+        override fun onMissingVoice(locale: Locale, downloadable: Boolean) {
+            val language = locale.getDisplayLanguage(Locale.ENGLISH).ifEmpty { locale.toString() }
+            val message = if (downloadable) {
+                "The $language voice isn't downloaded, so reading may need the internet or may not work.\n\n" +
+                    "Download it in the text-to-speech settings (engine settings → Install voice data)."
+            } else {
+                "The text-to-speech engine has no $language voice, so another voice is used."
+            }
+            showPlain(
+                AlertDialog.Builder(this@MainActivity)
+                    .setTitle("Read aloud")
+                    .setMessage(message)
+                    .setPositiveButton("Voice settings") { _, _ -> openSpeechSettings() }
+                    .setNegativeButton("OK", null)
+            )
+        }
+    }
+
+    private fun turnPageTo(offset: Int) {
+        val p = pages ?: return
+        if (loading) return // the page is chosen from spokenRange when the layout is ready
+        val target = p.pageForOffset(offset)
+        if (target != page) showPage(target)
+    }
+
+    private fun openSpeechSettings() {
+        try {
+            startActivity(Intent(ReadAloud.SETTINGS_ACTION))
+        } catch (e: Exception) {
+            showMessage("Read aloud", "Open Settings → Accessibility (or Language & input) → Text-to-speech output.")
+        }
+    }
+
+    private fun changeSpeechRate(delta: Float) {
+        val rate = ((speechRate + delta) * 10).let { Math.round(it) / 10f }.coerceIn(0.5f, 3f)
+        if (rate == speechRate) return
+        speechRate = rate
+        prefs.edit().putFloat("speech_rate", rate).apply()
+        speech?.rate = rate
+        updateReadAloudBar()
+        // Already queued sentences keep the old speed: after a short pause in the presses,
+        // restart the current sentence at the new speed.
+        if (speaking) {
+            mainHandler.removeCallbacks(restartAtNewRate)
+            mainHandler.postDelayed(restartAtNewRate, 700)
+        }
+    }
+
+    private val restartAtNewRate = Runnable {
+        val spoken = spokenRange
+        if (speaking && !loading && spoken != null) speakFrom(spoken.first)
+    }
+
+    private fun updateReadAloudBar() {
+        playButton.text = if (speaking) "Pause" else "Play"
+        rateLabel.text = String.format(Locale.US, "%.1f×", speechRate)
+    }
+
+    /** Pause/Play, Slower, speed, Faster, Stop. Plain bordered buttons, like the dictionary popup. */
+    private fun buildReadAloudBar(): LinearLayout {
+        val density = resources.displayMetrics.density
+        fun dp(v: Int) = (v * density).toInt()
+        fun button(label: String, onClick: () -> Unit) = TextView(this).apply {
+            text = label
+            setTextColor(Color.BLACK)
+            textSize = 16f
+            gravity = Gravity.CENTER
+            maxLines = 1
+            setPadding(dp(4), dp(10), dp(4), dp(10))
+            background = GradientDrawable().apply {
+                setColor(Color.WHITE)
+                setStroke(dp(1), Color.BLACK)
+                cornerRadius = dp(4).toFloat()
+            }
+            setOnClickListener { onClick() }
+        }
+        playButton = button("Pause") { if (speaking) pauseReading() else resumeReading() }
+        rateLabel = TextView(this).apply {
+            setTextColor(Color.BLACK)
+            textSize = 16f
+            gravity = Gravity.CENTER
+        }
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(12), dp(8), dp(12), dp(8))
+            val items = listOf(
+                playButton to 1.3f,
+                button("Slower") { changeSpeechRate(-0.1f) } to 1f,
+                rateLabel to 0.8f,
+                button("Faster") { changeSpeechRate(+0.1f) } to 1f,
+                button("Stop", ::stopReadingAloud) to 1f,
+            )
+            for ((i, item) in items.withIndex()) {
+                addView(item.first, LinearLayout.LayoutParams(0, WRAP_CONTENT, item.second).apply {
+                    if (i > 0) marginStart = dp(8)
+                })
+            }
+        }
+        updateReadAloudBar()
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.WHITE)
+            addView(View(this@MainActivity).apply { setBackgroundColor(Color.BLACK) }, MATCH_PARENT, dp(1))
+            addView(row, MATCH_PARENT, WRAP_CONTENT)
+            visibility = View.GONE
+        }
     }
 
     // ---------------------------------------------------------------- position sync
@@ -852,6 +1104,12 @@ class MainActivity : Activity() {
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
+        val volumeKey = keyCode == KeyEvent.KEYCODE_VOLUME_UP || keyCode == KeyEvent.KEYCODE_VOLUME_DOWN
+        if (readingAloud && volumeKey) return super.onKeyDown(keyCode, event) // loudness while listening
+        if (speaking && keyCode in PAGE_KEYS) {
+            pauseReading()
+            return true
+        }
         when (keyCode) {
             KeyEvent.KEYCODE_VOLUME_DOWN, KeyEvent.KEYCODE_PAGE_DOWN,
             KeyEvent.KEYCODE_DPAD_RIGHT, KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_SPACE -> nextPage()
@@ -867,5 +1125,10 @@ class MainActivity : Activity() {
         private const val REQUEST_OPEN = 1
         private const val REQUEST_DICTIONARY = 2
         private const val GOOGLE_TRANSLATE = "com.google.android.apps.translate"
+        private val PAGE_KEYS = setOf(
+            KeyEvent.KEYCODE_PAGE_DOWN, KeyEvent.KEYCODE_PAGE_UP, KeyEvent.KEYCODE_SPACE,
+            KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT, KeyEvent.KEYCODE_DPAD_UP,
+            KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_MENU,
+        )
     }
 }
