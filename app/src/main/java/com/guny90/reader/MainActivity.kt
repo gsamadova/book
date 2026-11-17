@@ -2,16 +2,20 @@ package com.guny90.reader
 
 import android.app.Activity
 import android.app.AlertDialog
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.SharedPreferences
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.provider.OpenableColumns
 import android.util.TypedValue
 import android.view.KeyEvent
+import android.widget.Toast
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import com.guny90.reader.dict.DefinitionText
@@ -44,6 +48,7 @@ class MainActivity : Activity() {
     private var page = 0
     private var pendingOffset = 0
     private var fontSp = 20
+    private var paragraphSpacing = 1 // index into Pages.PARAGRAPH_SPACINGS
     private var loading = false
     private var jobId = 0
     private var laidOutW = 0
@@ -57,6 +62,7 @@ class MainActivity : Activity() {
         window.setWindowAnimations(0)
         prefs = getSharedPreferences("reader", MODE_PRIVATE)
         fontSp = prefs.getInt("font_sp", 20)
+        paragraphSpacing = prefs.getInt("paragraph_spacing", 1).coerceIn(0, Pages.PARAGRAPH_SPACINGS.lastIndex)
 
         pageView = PageView(this)
         setContentView(pageView)
@@ -75,7 +81,7 @@ class MainActivity : Activity() {
             }
         }
         pageView.onTextAreaLaidOut = ::onTextAreaLaidOut
-        pageView.onWordLongPress = ::onWordLongPress
+        pageView.onTextSelected = ::onTextSelected
 
         val uri = intent?.data
         if (uri != null && savedInstanceState == null) openUri(uri) else restoreLastBook()
@@ -217,13 +223,14 @@ class MainActivity : Activity() {
         laidOutH = h
         val id = ++jobId
         loading = true
+        val spacing = Pages.PARAGRAPH_SPACINGS[paragraphSpacing].second
         val textPx = TypedValue.applyDimension(
             TypedValue.COMPLEX_UNIT_SP, fontSp.toFloat(), resources.displayMetrics
         )
         worker.execute {
             try {
                 val text = cached ?: HtmlText.toText(b.readChapter(target))
-                val result = Pages.paginate(text, w, h, textPx)
+                val result = Pages.paginate(text, w, h, textPx, spacing)
                 mainHandler.post {
                     if (id != jobId) return@post
                     chapterText = text
@@ -302,8 +309,25 @@ class MainActivity : Activity() {
             actions += "Contents" to ::showContents
             actions += "Larger text (${fontSp + 2})" to { changeFont(+2) }
             actions += "Smaller text (${fontSp - 2})" to { changeFont(-2) }
+            actions += "Paragraph spacing: ${Pages.PARAGRAPH_SPACINGS[paragraphSpacing].first}" to ::chooseParagraphSpacing
         }
         showList(b?.title ?: "Reader", actions.map { it.first }) { actions[it].second() }
+    }
+
+    private fun chooseParagraphSpacing() {
+        val names = Pages.PARAGRAPH_SPACINGS.map { it.first }.toTypedArray()
+        showPlain(
+            AlertDialog.Builder(this)
+                .setTitle("Paragraph spacing")
+                .setSingleChoiceItems(names, paragraphSpacing) { dialog, which ->
+                    dialog.dismiss()
+                    if (which != paragraphSpacing) {
+                        paragraphSpacing = which
+                        prefs.edit().putInt("paragraph_spacing", which).apply()
+                        loadChapter(chapter, currentOffset()) // same text, new layout: position is kept
+                    }
+                }
+        )
     }
 
     private fun showContents() {
@@ -433,8 +457,55 @@ class MainActivity : Activity() {
 
     private val dictPrefKey get() = bookKey.replaceFirst("pos_", "dict_")
 
-    /** Long-press flow: pick the book's dictionary (asking once if there are several), then look up. */
-    private fun onWordLongPress(word: String, centerY: Int) {
+    // ---------------------------------------------------------------- selection actions
+
+    /** After a selection: Dictionary (one word only), Google Translate (if installed), Copy. */
+    private fun onTextSelected(text: String, singleWord: Boolean, centerY: Int) {
+        val actions = ArrayList<Pair<String, () -> Unit>>()
+        if (singleWord && dictionaries.list().isNotEmpty()) actions += "Dictionary" to { lookUpWord(text, centerY) }
+        translateIntent(text)?.let { intent -> actions += "Google Translate" to { openTranslate(intent) } }
+        actions += "Copy" to { copyText(text) }
+        val title = if (text.length > 60) "“" + text.take(57).trimEnd() + "…”" else "“$text”"
+        showList(title, actions.map { it.first }, onCancel = { pageView.clearSelection() }) { actions[it].second() }
+    }
+
+    /**
+     * Google Translate's "translate selected text" screen (PROCESS_TEXT), falling back to sharing
+     * the text with it. Null if the app isn't installed. Translate needs internet unless
+     * the languages were downloaded for offline use in the Translate app.
+     */
+    private fun translateIntent(text: String): Intent? {
+        val process = Intent(Intent.ACTION_PROCESS_TEXT)
+            .setType("text/plain")
+            .putExtra(Intent.EXTRA_PROCESS_TEXT, text)
+            .putExtra(Intent.EXTRA_PROCESS_TEXT_READONLY, true)
+            .setPackage(GOOGLE_TRANSLATE)
+        val send = Intent(Intent.ACTION_SEND)
+            .setType("text/plain")
+            .putExtra(Intent.EXTRA_TEXT, text)
+            .setPackage(GOOGLE_TRANSLATE)
+        return listOf(process, send).firstOrNull { packageManager.queryIntentActivities(it, 0).isNotEmpty() }
+    }
+
+    private fun openTranslate(intent: Intent) {
+        pageView.clearSelection()
+        try {
+            startActivity(intent)
+        } catch (e: Exception) {
+            showMessage("Google Translate", "Could not open Google Translate.\n${e.message ?: ""}")
+        }
+    }
+
+    private fun copyText(text: String) {
+        pageView.clearSelection()
+        val clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
+        clipboard.setPrimaryClip(ClipData.newPlainText("Reader", text))
+        // Android 13+ shows its own "copied" confirmation.
+        if (Build.VERSION.SDK_INT < 33) Toast.makeText(this, "Copied", Toast.LENGTH_SHORT).show()
+    }
+
+    /** Dictionary flow: pick the book's dictionary (asking once if there are several), then look up. */
+    private fun lookUpWord(word: String, centerY: Int) {
         val dicts = dictionaries.list()
         if (dicts.isEmpty()) {
             pageView.clearSelection()
@@ -532,5 +603,6 @@ class MainActivity : Activity() {
     companion object {
         private const val REQUEST_OPEN = 1
         private const val REQUEST_DICTIONARY = 2
+        private const val GOOGLE_TRANSLATE = "com.google.android.apps.translate"
     }
 }

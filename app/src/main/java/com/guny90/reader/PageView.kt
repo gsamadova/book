@@ -5,9 +5,11 @@ import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
-import android.graphics.Path
 import android.graphics.Typeface
 import android.text.Layout
+import android.text.SpannableStringBuilder
+import android.text.Spanned
+import android.text.style.LineHeightSpan
 import android.text.StaticLayout
 import android.text.TextPaint
 import android.text.TextUtils
@@ -34,7 +36,16 @@ class Pages(val layout: StaticLayout, private val starts: IntArray) {
 
     companion object {
         /** Runs on a background thread. The cheap break strategy matters a lot on slow e-ink CPUs. */
-        fun paginate(text: CharSequence, width: Int, height: Int, textSizePx: Float): Pages {
+        /** Extra space after each paragraph, as a fraction of the text size (menu choices). */
+        val PARAGRAPH_SPACINGS = listOf("None" to 0f, "Small" to 0.35f, "Medium" to 0.7f, "Large" to 1.1f)
+
+        fun paginate(
+            chapter: CharSequence, width: Int, height: Int, textSizePx: Float, paragraphSpacing: Float,
+        ): Pages {
+            val text = SpannableStringBuilder(chapter)
+            val gap = (paragraphSpacing * textSizePx).toInt()
+            if (gap > 0) text.setSpan(ParagraphGap(gap), 0, text.length, Spanned.SPAN_INCLUSIVE_INCLUSIVE)
+
             val paint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
                 color = Color.BLACK
                 linkColor = Color.BLACK // default is transparent: links (e.g. TOC pages) would be invisible
@@ -61,6 +72,18 @@ class Pages(val layout: StaticLayout, private val starts: IntArray) {
             return Pages(layout, starts.toIntArray())
         }
     }
+
+    /** Adds [gap] px below the last line of every paragraph (but not after a <br> line break). */
+    private class ParagraphGap(private val gap: Int) : LineHeightSpan {
+        override fun chooseHeight(
+            text: CharSequence, start: Int, end: Int, spanstartv: Int, lineHeight: Int, fm: Paint.FontMetricsInt,
+        ) {
+            if (end <= 0 || end > text.length || text[end - 1] != '\n') return
+            if (text is Spanned && text.getSpans(end - 1, end, HtmlText.LineBreak::class.java).isNotEmpty()) return
+            fm.descent += gap
+            fm.bottom += gap
+        }
+    }
 }
 
 /**
@@ -71,8 +94,11 @@ class PageView(context: Context) : View(context) {
     enum class Zone { PREV, MENU, NEXT }
 
     var onTap: ((Zone) -> Unit)? = null
-    /** Long-press on a word: the word and the vertical center of it on screen. */
-    var onWordLongPress: ((word: String, centerY: Int) -> Unit)? = null
+    /**
+     * Long-press selects a word; sliding the finger (without lifting) extends the selection.
+     * On release: the selected text, whether it is one word, and its vertical center on screen.
+     */
+    var onTextSelected: ((text: String, singleWord: Boolean, centerY: Int) -> Unit)? = null
     /** Called after layout; the activity re-paginates if the text area size changed. */
     var onTextAreaLaidOut: (() -> Unit)? = null
 
@@ -101,7 +127,6 @@ class PageView(context: Context) : View(context) {
         style = Paint.Style.STROKE
         strokeWidth = 2 * density
     }
-    private val selectionPath = Path()
 
     // Long-press detection. Generous slop: e-ink touch panels report jittery coordinates.
     private val longPressTimeout = ViewConfiguration.getLongPressTimeout().toLong()
@@ -110,9 +135,11 @@ class PageView(context: Context) : View(context) {
     private var downY = 0f
     private var pressing = false
     private var longPressed = false
+    private var selecting = false
+    private var anchor: IntRange? = null // the long-pressed word; the selection always includes it
     private val longPressAction = Runnable {
         longPressed = true
-        selectWordAt(downX, downY)
+        selecting = startSelection(downX, downY)
     }
 
     init {
@@ -165,11 +192,7 @@ class PageView(context: Context) : View(context) {
         canvas.translate((paddingLeft + margin).toFloat(), (paddingTop + margin - top).toFloat())
         canvas.clipRect(0, top, layout.width, bottom)
         layout.draw(canvas) // only draws lines inside the clip
-        selection?.let { sel ->
-            selectionPath.reset()
-            layout.getSelectionPath(sel.first, sel.last + 1, selectionPath)
-            canvas.drawPath(selectionPath, selectionPaint) // outline box, no gray fill
-        }
+        selection?.let { sel -> drawSelection(canvas, layout, sel) }
         canvas.restore()
 
         val baseline = (height - paddingBottom - statusHeight / 3).toFloat()
@@ -181,6 +204,27 @@ class PageView(context: Context) : View(context) {
         )
         canvas.drawText(title, 0, title.length, left, baseline, statusPaint)
         canvas.drawText(statusRight, right - rightWidth, baseline, statusPaint)
+    }
+
+    /** One outline box per line, from the first to the last selected letter (no gray fill). */
+    private fun drawSelection(canvas: Canvas, layout: Layout, sel: IntRange) {
+        val text = layout.text
+        val descent = layout.paint.fontMetricsInt.descent
+        for (line in layout.getLineForOffset(sel.first)..layout.getLineForOffset(sel.last)) {
+            var start = maxOf(sel.first, layout.getLineStart(line))
+            var end = minOf(sel.last + 1, layout.getLineEnd(line))
+            while (start < end && text[start].isWhitespace()) start++
+            while (end > start && text[end - 1].isWhitespace()) end--
+            if (start >= end) continue
+            val left = layout.getPrimaryHorizontal(start)
+            val right = if (end >= layout.getLineEnd(line)) layout.getLineRight(line) else layout.getPrimaryHorizontal(end)
+            val pad = selectionPaint.strokeWidth
+            canvas.drawRect(
+                minOf(left, right) - pad, layout.getLineTop(line).toFloat(),
+                maxOf(left, right) + pad, (layout.getLineBaseline(line) + descent).toFloat() + pad,
+                selectionPaint,
+            )
+        }
     }
 
     private fun drawMessage(canvas: Canvas, text: String) {
@@ -202,17 +246,23 @@ class PageView(context: Context) : View(context) {
                 downY = event.y
                 pressing = true
                 longPressed = false
+                selecting = false
                 postDelayed(longPressAction, longPressTimeout)
             }
             MotionEvent.ACTION_MOVE -> {
-                if (pressing && Math.hypot((event.x - downX).toDouble(), (event.y - downY).toDouble()) > touchSlop) {
+                if (selecting) {
+                    extendSelectionTo(event.x, event.y)
+                } else if (pressing && Math.hypot((event.x - downX).toDouble(), (event.y - downY).toDouble()) > touchSlop) {
                     pressing = false
                     removeCallbacks(longPressAction)
                 }
             }
             MotionEvent.ACTION_UP -> {
                 removeCallbacks(longPressAction)
-                if (pressing && !longPressed) {
+                if (selecting) {
+                    selecting = false
+                    finishSelection()
+                } else if (pressing && !longPressed) {
                     val zone = when {
                         event.x < width / 3f -> Zone.PREV
                         event.x > width * 2f / 3f -> Zone.NEXT
@@ -225,24 +275,74 @@ class PageView(context: Context) : View(context) {
             MotionEvent.ACTION_CANCEL -> {
                 removeCallbacks(longPressAction)
                 pressing = false
+                if (selecting) {
+                    selecting = false
+                    clearSelection()
+                }
             }
         }
         return true
     }
 
-    private fun selectWordAt(x: Float, y: Float) {
-        val p = pages ?: return
-        val range = wordAt(p, x, y) ?: return
+    private fun startSelection(x: Float, y: Float): Boolean {
+        val p = pages ?: return false
+        val range = wordAt(p, x, y) ?: return false
+        anchor = range
         selection = range
         invalidate()
-        val layout = p.layout
-        val line = layout.getLineForOffset(range.first)
-        val pageTop = layout.getLineTop(p.startLine(page))
-        val centerY = paddingTop + margin + (layout.getLineTop(line) + layout.getLineBottom(line)) / 2 - pageTop
-        val word = layout.text.subSequence(range.first, range.last + 1).toString()
+        return true
+    }
+
+    /** Grows the selection from the anchor word to the word (or position) under the finger. */
+    private fun extendSelectionTo(x: Float, y: Float) {
+        val p = pages ?: return
+        val a = anchor ?: return
+        val text = p.layout.text
+        val offset = offsetAt(p, x, y)
+        val word = wordAround(text, offset)
+        val pageStart = p.layout.getLineStart(p.startLine(page))
+        val pageLast = p.layout.getLineEnd(p.endLine(page) - 1) - 1
+        val start = minOf(a.first, word?.first ?: offset).coerceAtLeast(pageStart)
+        val end = maxOf(a.last, word?.last ?: (offset - 1)).coerceAtMost(pageLast)
+        val range = start..end
+        if (range != selection) { // redraw only on change: every redraw costs an e-ink refresh
+            selection = range
+            invalidate()
+        }
+    }
+
+    private fun finishSelection() {
+        val p = pages ?: return
+        val sel = selection ?: return
+        val text = p.layout.text
+        var start = sel.first
+        var end = sel.last
+        while (start < end && !text[start].isLetterOrDigit()) start++
+        while (end > start && !text[end].isLetterOrDigit()) end--
+        val selected = text.subSequence(start, end + 1).toString()
             .replace("\u00AD", "") // soft hyphens
             .replace('\u2019', '\'')
-        onWordLongPress?.invoke(word, centerY)
+            .replace(Regex("\\s+"), " ")
+            .trim()
+        if (selected.isEmpty()) {
+            clearSelection()
+            return
+        }
+        val layout = p.layout
+        val pageTop = layout.getLineTop(p.startLine(page))
+        val top = layout.getLineTop(layout.getLineForOffset(start))
+        val bottom = layout.getLineBottom(layout.getLineForOffset(end))
+        val centerY = paddingTop + margin + (top + bottom) / 2 - pageTop
+        onTextSelected?.invoke(selected, !selected.contains(' '), centerY)
+    }
+
+    /** Character offset nearest to (x, y), clamped to the lines of the current page. */
+    private fun offsetAt(p: Pages, x: Float, y: Float): Int {
+        val layout = p.layout
+        val top = layout.getLineTop(p.startLine(page))
+        val bottom = layout.getLineTop(p.endLine(page))
+        val ly = ((y - paddingTop - margin).toInt() + top).coerceIn(top, bottom - 1)
+        return layout.getOffsetForHorizontal(layout.getLineForVertical(ly), x - paddingLeft - margin)
     }
 
     /** The word under (x, y) on the current page, as a character range of the chapter text. */
@@ -256,10 +356,14 @@ class PageView(context: Context) : View(context) {
         val lx = x - paddingLeft - margin
         if (lx < layout.getLineLeft(line) - margin || lx > layout.getLineRight(line) + margin) return null
 
-        var offset = layout.getOffsetForHorizontal(line, lx)
-        val lineStart = layout.getLineStart(line)
+        return wordAround(text, layout.getOffsetForHorizontal(line, lx))
+    }
+
+    /** The word containing [position] (or ending right before it), or null between words. */
+    private fun wordAround(text: CharSequence, position: Int): IntRange? {
+        var offset = position
         if (offset >= text.length || !isWordChar(text, offset)) {
-            if (offset > lineStart && isWordChar(text, offset - 1)) offset-- else return null
+            if (offset > 0 && offset <= text.length && isWordChar(text, offset - 1)) offset-- else return null
         }
         var start = offset
         while (start > 0 && isWordChar(text, start - 1)) start--
