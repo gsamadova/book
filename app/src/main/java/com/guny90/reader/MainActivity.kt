@@ -87,6 +87,8 @@ class MainActivity : Activity() {
     private var oneWordAction = OneWord.DICTIONARY
     private var severalWordsAction = SeveralWords.TRANSLATE
     private var showPictures = true
+    /** Pictures and PDF pages drawn in gray rather than their own colors. */
+    private var grayPictures = true
     /** Latest page waiting for its pictures to be decoded. */
     private var pictureJob = 0
     /** Pictures holding a decoded bitmap, oldest first (worker thread only). */
@@ -132,6 +134,8 @@ class MainActivity : Activity() {
             ?: SeveralWords.TRANSLATE
         speechRate = prefs.getFloat("speech_rate", 1f)
         showPictures = prefs.getBoolean("pictures", true)
+        grayPictures = prefs.getBoolean("gray_pictures", true)
+        PictureSpan.setGray(grayPictures)
         volumeControlStream = AudioManager.STREAM_MUSIC
         removeOldPdfText()
 
@@ -606,6 +610,15 @@ class MainActivity : Activity() {
         loadChapter(chapter, currentOffset()) // same text either way: the position is kept
     }
 
+    private fun togglePictureColors() {
+        grayPictures = !grayPictures
+        prefs.edit().putBoolean("gray_pictures", grayPictures).apply()
+        PictureSpan.setGray(grayPictures)
+        pageView.invalidate()
+    }
+
+    private fun pictureColorsName() = if (grayPictures) "Gray" else "Original"
+
     /** Long-press on a picture: show it full screen, at the screen's resolution. */
     private fun openPicture(picture: PictureSpan) {
         val b = book ?: return
@@ -655,6 +668,7 @@ class MainActivity : Activity() {
                 // Pages are pictures: no text settings or reading aloud, but words can be selected.
                 actions += "Go to page… (${pdfPage + 1} of ${d.pageCount})" to ::showGoToPage
                 actions += "Words: ${oneWordAction.label} · ${severalWordsAction.label}" to ::showWordsMenu
+                actions += "Colors: ${pictureColorsName()}" to { togglePictureColors(); showMenu() }
             }
             b != null -> {
                 actions += "Contents" to ::showContents
@@ -677,6 +691,9 @@ class MainActivity : Activity() {
         actions += "Smaller text (${fontSp - 2})" to { changeFont(-2); showTextMenu() }
         actions += "Paragraph spacing: ${spacingName()}" to ::chooseParagraphSpacing
         actions += "Pictures: ${if (showPictures) "On" else "Off"}" to { togglePictures(); showTextMenu() }
+        if (showPictures) {
+            actions += "Picture colors: ${pictureColorsName()}" to { togglePictureColors(); showTextMenu() }
+        }
         showList("Text", actions.map { it.first }) { actions[it].second() }
     }
 

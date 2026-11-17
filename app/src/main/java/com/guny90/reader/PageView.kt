@@ -159,9 +159,16 @@ class PictureSpan(
     }
 
     companion object {
-        /** Gray: an e-ink screen shows nothing else anyway, and colors would dither unevenly. */
-        val picturePaint = Paint(Paint.FILTER_BITMAP_FLAG).apply {
-            colorFilter = ColorMatrixColorFilter(ColorMatrix().apply { setSaturation(0f) })
+        /** Paint for pictures and PDF pages; gray when [gray] is set (see [setGray]). */
+        val picturePaint = Paint(Paint.FILTER_BITMAP_FLAG)
+        private val grayFilter = ColorMatrixColorFilter(ColorMatrix().apply { setSaturation(0f) })
+
+        /**
+         * Gray suits black-and-white e-ink, where colors of similar brightness can merge and
+         * dither unevenly; elsewhere pictures can keep their own colors. Redraw after changing it.
+         */
+        fun setGray(gray: Boolean) {
+            picturePaint.colorFilter = if (gray) grayFilter else null
         }
         private val framePaint = Paint().apply {
             color = Color.BLACK
