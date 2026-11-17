@@ -11,7 +11,7 @@ import java.net.URLEncoder
 import java.security.MessageDigest
 
 /**
- * Client for the KOReader sync server protocol ("kosync"), e.g. https://sync.koreader.rocks.
+ * Client for the KOReader sync server protocol ("kosync"), e.g. https://kosync.eu or https://sync.koreader.rocks.
  * Stores only a small record per book: an opaque position string, a percentage and the device.
  *
  * [key] is the MD5 of the password: the server never sees the password itself.
@@ -121,7 +121,7 @@ class KoSync(
     }
 
     companion object {
-        const val DEFAULT_SERVER = "https://sync.koreader.rocks"
+        const val DEFAULT_SERVER = "https://kosync.eu"
         const val SERVER_DOWN = "The sync server isn't responding. It may be temporarily down; please try again later."
 
         fun md5Hex(text: String): String = hex(MessageDigest.getInstance("MD5").digest(text.toByteArray(Charsets.UTF_8)))
