@@ -51,23 +51,31 @@ Tap the middle of the screen. The items depend on the book:
 - **Back to where you were**: appears after you follow a link (see below).
 - **Contents**: the book's table of contents.
 - **Read aloud**
-- **Text**: text size, paragraph spacing, pictures.
+- **Text**: font, text size, paragraph spacing, pictures.
 - **Words**: what selecting words does, and your dictionaries.
 - **Sync**: reading position and book sync.
+- **Night mode**
 - **Open book…**
 
-For PDFs: **Go to page…**, **Words** and **Colors**.
+For PDFs: **Go to page…**, **Words**, **Colors**, and at night **Invert pages at night**.
 
 ## Text and pictures
 
 **Menu → Text**:
 
+- **Font**: Serif, Literata (a font made for reading on screens), Sans-serif, Condensed (fits more words on a line) or Monospace.
 - **Larger text / Smaller text**: changes the size in steps of 2. The menu stays open, so you can tap again.
 - **Paragraph spacing**: None, Small, Medium or Large.
 - **Pictures: On / Off**: shows or hides the pictures in the book. Your place in the book stays the same either way.
 - **Picture colors: Gray / Original**: Gray suits black-and-white e-ink screens. Choose Original on a phone, tablet or color screen.
 
 **Long-press a picture** to see it full screen.
+
+## Night mode
+
+**Menu → Night mode** shows light text on black, for reading in the dark. Menus, the dictionary popup and the read-aloud bar turn dark too. Pictures in books keep their colors.
+
+PDF pages are inverted at night, which suits pages of text. For comics or picture books, turn this off with **Menu → Invert pages at night**.
 
 ## Links and footnotes
 

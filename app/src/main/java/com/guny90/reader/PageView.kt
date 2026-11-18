@@ -50,7 +50,7 @@ class Pages(val layout: StaticLayout, private val starts: IntArray) {
          */
         fun paginate(
             chapter: CharSequence, width: Int, height: Int, textSizePx: Float, paragraphSpacing: Float,
-            pictureSize: ((String) -> IntArray?)? = null, pixelScale: Float = 1f,
+            pictureSize: ((String) -> IntArray?)? = null, pixelScale: Float = 1f, typeface: Typeface = Typeface.SERIF,
         ): Pages {
             val text = SpannableStringBuilder(chapter)
             val gap = (paragraphSpacing * textSizePx).toInt()
@@ -72,10 +72,10 @@ class Pages(val layout: StaticLayout, private val starts: IntArray) {
             }
 
             val paint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = Color.BLACK
-                linkColor = Color.BLACK // default is transparent: links (e.g. TOC pages) would be invisible
+                color = Ink.text // set again before drawing, as night mode can change without a new layout
+                linkColor = Ink.text // default is transparent: links (e.g. TOC pages) would be invisible
                 textSize = textSizePx
-                typeface = Typeface.SERIF
+                this.typeface = typeface
             }
             val layout = StaticLayout.Builder.obtain(text, 0, text.length, paint, width)
                 .setAlignment(Layout.Alignment.ALIGN_NORMAL)
@@ -155,20 +155,32 @@ class PictureSpan(
         val box = RectF(left, (top + pad).toFloat(), left + width, (top + pad + height).toFloat())
         val bmp = bitmap
         if (bmp != null) canvas.drawBitmap(bmp, null, box, picturePaint)
-        else canvas.drawRect(box, framePaint)
+        else canvas.drawRect(box, framePaint.apply { color = Ink.text })
     }
 
     companion object {
-        /** Paint for pictures and PDF pages; gray when [gray] is set (see [setGray]). */
+        /** Paint for pictures; gray or in their own colors (see [setColors]). */
         val picturePaint = Paint(Paint.FILTER_BITMAP_FLAG)
-        private val grayFilter = ColorMatrixColorFilter(ColorMatrix().apply { setSaturation(0f) })
+        /** Paint for PDF pages: like [picturePaint], and inverted in night mode (pages are mostly text). */
+        val pdfPaint = Paint(Paint.FILTER_BITMAP_FLAG)
+        private val gray = ColorMatrix().apply { setSaturation(0f) }
+        private val invert = ColorMatrix(floatArrayOf(
+            -1f, 0f, 0f, 0f, 255f,
+            0f, -1f, 0f, 0f, 255f,
+            0f, 0f, -1f, 0f, 255f,
+            0f, 0f, 0f, 1f, 0f,
+        ))
 
         /**
          * Gray suits black-and-white e-ink, where colors of similar brightness can merge and
          * dither unevenly; elsewhere pictures can keep their own colors. Redraw after changing it.
          */
-        fun setGray(gray: Boolean) {
-            picturePaint.colorFilter = if (gray) grayFilter else null
+        fun setColors(gray: Boolean, night: Boolean) {
+            picturePaint.colorFilter = if (gray) ColorMatrixColorFilter(this.gray) else null
+            val pdf = ColorMatrix()
+            if (gray) pdf.postConcat(this.gray)
+            if (night) pdf.postConcat(invert)
+            pdfPaint.colorFilter = if (gray || night) ColorMatrixColorFilter(pdf) else null
         }
         private val framePaint = Paint().apply {
             color = Color.BLACK
@@ -339,9 +351,15 @@ class PageView(context: Context) : View(context) {
     }
 
     override fun onDraw(canvas: Canvas) {
+        canvas.drawColor(Ink.paper)
+        val ink = Ink.text
+        statusPaint.color = ink
+        messagePaint.color = ink
+        selectionPaint.color = ink
+        underlinePaint.color = ink
         val img = image
         if (img != null) {
-            canvas.drawBitmap(img.bitmap, imageLeft(img), imageTop(img), PictureSpan.picturePaint)
+            canvas.drawBitmap(img.bitmap, imageLeft(img), imageTop(img), PictureSpan.pdfPaint)
             val w = words
             val sel = selection
             if (w != null && sel != null) drawPdfSelection(canvas, img, w, sel)
@@ -354,6 +372,8 @@ class PageView(context: Context) : View(context) {
             return
         }
         val layout = p.layout
+        layout.paint.color = Ink.text
+        layout.paint.linkColor = Ink.text
         val top = layout.getLineTop(p.startLine(page))
         val bottom = layout.getLineTop(p.endLine(page))
         canvas.save()

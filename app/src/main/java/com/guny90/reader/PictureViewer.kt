@@ -22,7 +22,7 @@ class PictureViewer(activity: Activity, private val bitmap: Bitmap, onDismiss: (
     init {
         val view = object : View(activity) {
             override fun onDraw(canvas: Canvas) {
-                canvas.drawColor(Color.WHITE)
+                canvas.drawColor(Ink.paper)
                 val scale = minOf(width.toFloat() / bitmap.width, height.toFloat() / bitmap.height)
                 val w = bitmap.width * scale
                 val h = bitmap.height * scale
@@ -36,7 +36,7 @@ class PictureViewer(activity: Activity, private val bitmap: Bitmap, onDismiss: (
         dialog.setContentView(view, android.view.ViewGroup.LayoutParams(MATCH_PARENT, MATCH_PARENT))
         dialog.setOnDismissListener { onDismiss() }
         dialog.window?.apply {
-            setBackgroundDrawable(ColorDrawable(Color.WHITE)) // also removes the default dialog margins
+            setBackgroundDrawable(ColorDrawable(Ink.paper)) // also removes the default dialog margins
             setWindowAnimations(0)
             clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
             setLayout(MATCH_PARENT, MATCH_PARENT)

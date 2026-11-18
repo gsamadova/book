@@ -10,6 +10,7 @@ import android.content.Intent
 import android.content.SharedPreferences
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.InsetDrawable
 import android.media.AudioManager
 import android.net.Uri
 import android.os.Build
@@ -33,6 +34,7 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import com.guny90.reader.dict.DefinitionText
 import com.guny90.reader.dict.Dictionaries
 import com.guny90.reader.sync.KoSync
@@ -108,6 +110,11 @@ class MainActivity : Activity() {
     private enum class OneWord(val label: String) { DICTIONARY("Dictionary"), TRANSLATE("Google Translate"), ASK("Ask") }
     private enum class SeveralWords(val label: String) { TRANSLATE("Google Translate"), COPY("Copy"), ASK("Ask") }
     private var loading = false
+    private lateinit var root: LinearLayout
+    /** Index into [Fonts.names]. */
+    private var fontIndex = 0
+    /** In night mode, PDF pages are inverted (good for text, odd for pictures). */
+    private var invertPdfAtNight = true
     @Volatile private var jobId = 0 // also read on the worker, to skip superseded PDF renders
     private var laidOutW = 0
     private var laidOutH = 0
@@ -145,20 +152,24 @@ class MainActivity : Activity() {
         speechRate = prefs.getFloat("speech_rate", 1f)
         showPictures = prefs.getBoolean("pictures", true)
         grayPictures = prefs.getBoolean("gray_pictures", true)
-        PictureSpan.setGray(grayPictures)
+        Ink.night = prefs.getBoolean("night", false)
+        invertPdfAtNight = prefs.getBoolean("night_invert_pdf", true)
+        fontIndex = prefs.getInt("font", 0).coerceIn(0, Fonts.names.lastIndex)
+        PictureSpan.setColors(grayPictures, Ink.night && invertPdfAtNight)
         volumeControlStream = AudioManager.STREAM_MUSIC
         removeOldPdfText()
 
         pageView = PageView(this)
         controls = buildReadAloudBar()
-        val root = LinearLayout(this).apply {
+        root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.WHITE)
+            setBackgroundColor(Ink.paper)
             // Showing the bar shrinks the page; the chapter is re-paginated, keeping the position.
             addView(pageView, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
             addView(controls, MATCH_PARENT, WRAP_CONTENT)
         }
         setContentView(root)
+        updateSystemBars()
         ViewCompat.setOnApplyWindowInsetsListener(root) { v, insets ->
             val bars = insets.getInsets(
                 WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
@@ -254,7 +265,7 @@ class MainActivity : Activity() {
             entries.map { e -> (if (e.fileName == open) "\u25B8 " else "") + e.title + (if (e.isPdf) " (PDF)" else "") } +
             onlyShared.map { b -> "\u21E3 " + b.title + (if (b.isPdf) " (PDF)" else "") }
         val dialog = showPlain(
-            AlertDialog.Builder(this)
+            dialog()
                 .setTitle("Library (long-press to remove)")
                 .setItems(items.toTypedArray()) { _, i ->
                     when {
@@ -287,7 +298,7 @@ class MainActivity : Activity() {
 
     private fun confirmDeleteShared(book: SharedFolder.Book) {
         showPlain(
-            AlertDialog.Builder(this)
+            dialog()
                 .setTitle("Delete from the shared folder?")
                 .setMessage("${book.name}\n\nThe sync app will delete it on your other devices' folders too. Books already in a device's library stay there.")
                 .setPositiveButton("Delete") { _, _ ->
@@ -320,7 +331,7 @@ class MainActivity : Activity() {
 
     private fun confirmRemove(entry: Library.Entry) {
         showPlain(
-            AlertDialog.Builder(this)
+            dialog()
                 .setTitle("Remove from library?")
                 .setMessage("${entry.title}\n\nIts reading position is kept, so if you add it again it opens where you left off.")
                 .setPositiveButton("Remove") { _, _ ->
@@ -596,6 +607,7 @@ class MainActivity : Activity() {
             TypedValue.COMPLEX_UNIT_SP, fontSp.toFloat(), resources.displayMetrics
         )
         val pictures = showPictures
+        val typeface = Fonts.typeface(this, fontIndex)
         // Picture pixels are CSS pixels: as large as on a phone screen, then fitted to the page.
         val pixelScale = resources.displayMetrics.density
         worker.execute {
@@ -605,7 +617,7 @@ class MainActivity : Activity() {
                 val text = content.text
                 val at = anchor?.let { findAnchor(content.anchors, it) } ?: offset
                 val pictureSize: ((String) -> IntArray?)? = if (pictures) b::pictureSize else null
-                val result = Pages.paginate(text, w, h, textPx, spacing, pictureSize, pixelScale)
+                val result = Pages.paginate(text, w, h, textPx, spacing, pictureSize, pixelScale, typeface)
                 mainHandler.post {
                     if (id != jobId) return@post
                     chapterText = text
@@ -793,9 +805,47 @@ class MainActivity : Activity() {
     private fun togglePictureColors() {
         grayPictures = !grayPictures
         prefs.edit().putBoolean("gray_pictures", grayPictures).apply()
-        PictureSpan.setGray(grayPictures)
+        PictureSpan.setColors(grayPictures, Ink.night && invertPdfAtNight)
         pageView.invalidate()
     }
+
+    /** Light text on black, for reading in the dark. Pictures keep their colors; PDF pages are inverted. */
+    private fun toggleNight() {
+        Ink.night = !Ink.night
+        prefs.edit().putBoolean("night", Ink.night).apply()
+        PictureSpan.setColors(grayPictures, Ink.night && invertPdfAtNight)
+        root.setBackgroundColor(Ink.paper)
+        // The read-aloud bar's buttons take their colors when built.
+        val visibility = controls.visibility
+        val index = root.indexOfChild(controls)
+        root.removeView(controls)
+        controls = buildReadAloudBar()
+        controls.visibility = visibility
+        root.addView(controls, index, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        updateReadAloudBar()
+        updateSystemBars()
+        pageView.invalidate()
+    }
+
+    /** Dark status and navigation bar icons on white, light ones in night mode. */
+    private fun updateSystemBars() {
+        WindowInsetsControllerCompat(window, window.decorView).apply {
+            isAppearanceLightStatusBars = !Ink.night
+            isAppearanceLightNavigationBars = !Ink.night
+        }
+    }
+
+    private fun chooseFont() {
+        chooseOption("Font", Fonts.names, fontIndex) { i ->
+            if (i == fontIndex) return@chooseOption
+            fontIndex = i
+            prefs.edit().putInt("font", i).apply()
+            if (book != null) loadChapter(chapter, currentOffset())
+        }
+    }
+
+    private fun dialog() =
+        if (Ink.night) AlertDialog.Builder(this, R.style.Theme_Reader_Dialog_Night) else AlertDialog.Builder(this)
 
     private fun pictureColorsName() = if (grayPictures) "Gray" else "Original"
 
@@ -849,6 +899,13 @@ class MainActivity : Activity() {
                 actions += "Go to page… (${pdfPage + 1} of ${d.pageCount})" to ::showGoToPage
                 actions += "Words: ${oneWordAction.label} · ${severalWordsAction.label}" to ::showWordsMenu
                 actions += "Colors: ${pictureColorsName()}" to { togglePictureColors(); showMenu() }
+                if (Ink.night) actions += "Invert pages at night: ${if (invertPdfAtNight) "On" else "Off"}" to {
+                    invertPdfAtNight = !invertPdfAtNight
+                    prefs.edit().putBoolean("night_invert_pdf", invertPdfAtNight).apply()
+                    PictureSpan.setColors(grayPictures, Ink.night && invertPdfAtNight)
+                    pageView.invalidate()
+                    showMenu()
+                }
             }
             b != null -> {
                 backStack.lastOrNull()?.let { (ch, _) ->
@@ -857,12 +914,13 @@ class MainActivity : Activity() {
                 actions += "Contents" to ::showContents
                 actions += if (readingAloud) "Stop reading aloud" to ::stopReadingAloud
                 else "Read aloud" to ::startReadingAloud
-                actions += "Text: $fontSp · ${spacingName()} spacing · pictures ${onOff(showPictures)}" to ::showTextMenu
+                actions += "Text: ${Fonts.names[fontIndex]} $fontSp · ${spacingName()} spacing · pictures ${onOff(showPictures)}" to ::showTextMenu
                 actions += "Words: ${oneWordAction.label} · ${severalWordsAction.label}" to ::showWordsMenu
             }
             else -> actions += "Dictionaries" to ::showDictionaries
         }
         actions += "Sync: positions ${onOff(positionSync.isEnabled)} · books ${onOff(sharedFolder.isEnabled)}" to ::showSyncMenu
+        actions += "Night mode: ${if (Ink.night) "On" else "Off"}" to { toggleNight(); showMenu() }
         actions += "Open book…" to ::showLibrary
         showList(d?.title ?: b?.title ?: "Book", actions.map { it.first }) { actions[it].second() }
     }
@@ -872,6 +930,7 @@ class MainActivity : Activity() {
         val actions = ArrayList<Pair<String, () -> Unit>>()
         actions += "Larger text (${fontSp + 2})" to { changeFont(+2); showTextMenu() }
         actions += "Smaller text (${fontSp - 2})" to { changeFont(-2); showTextMenu() }
+        actions += "Font: ${Fonts.names[fontIndex]}" to ::chooseFont
         actions += "Paragraph spacing: ${spacingName()}" to ::chooseParagraphSpacing
         actions += "Pictures: ${if (showPictures) "On" else "Off"}" to { togglePictures(); showTextMenu() }
         if (showPictures) {
@@ -896,7 +955,7 @@ class MainActivity : Activity() {
     private fun chooseParagraphSpacing() {
         val names = Pages.PARAGRAPH_SPACINGS.map { it.first }.toTypedArray()
         showPlain(
-            AlertDialog.Builder(this)
+            dialog()
                 .setTitle("Paragraph spacing")
                 .setSingleChoiceItems(names, paragraphSpacing) { dialog, which ->
                     dialog.dismiss()
@@ -925,7 +984,7 @@ class MainActivity : Activity() {
 
     private fun chooseOption(title: String, names: List<String>, selected: Int, onPick: (Int) -> Unit) {
         showPlain(
-            AlertDialog.Builder(this)
+            dialog()
                 .setTitle(title)
                 .setSingleChoiceItems(names.toTypedArray(), selected) { dialog, which ->
                     dialog.dismiss()
@@ -962,7 +1021,7 @@ class MainActivity : Activity() {
     /** Asks first: a stray tap shouldn't take you out of the book. */
     private fun openExternalLink(url: String) {
         showPlain(
-            AlertDialog.Builder(this)
+            dialog()
                 .setTitle("Open in browser?")
                 .setMessage(url)
                 .setPositiveButton("Open") { _, _ ->
@@ -1060,7 +1119,7 @@ class MainActivity : Activity() {
     private fun showNotePopup(note: CharSequence, target: String) {
         if (note.isBlank()) return jumpTo(target)
         showPlain(
-            AlertDialog.Builder(this)
+            dialog()
                 .setTitle("Note")
                 .setMessage(note)
                 .setPositiveButton("Close", null)
@@ -1085,7 +1144,7 @@ class MainActivity : Activity() {
             showPdfPage(number - 1)
         }
         val dialog = showPlain(
-            AlertDialog.Builder(this)
+            dialog()
                 .setTitle("Go to page")
                 .setView(form)
                 .setPositiveButton("Go") { _, _ -> go() }
@@ -1101,7 +1160,7 @@ class MainActivity : Activity() {
     }
 
     private fun showList(title: String, items: List<String>, onCancel: (() -> Unit)? = null, onPick: (Int) -> Unit) {
-        val builder = AlertDialog.Builder(this)
+        val builder = dialog()
             .setTitle(title)
             .setItems(items.toTypedArray()) { _, which -> onPick(which) }
         if (onCancel != null) builder.setOnCancelListener { onCancel() }
@@ -1114,20 +1173,29 @@ class MainActivity : Activity() {
         dialog.window?.apply {
             setWindowAnimations(0)
             clearFlags(android.view.WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+            if (Ink.night) {
+                // Black on a black page: a thin border shows where the dialog is (it has no visible shadow).
+                val dp = resources.displayMetrics.density
+                setBackgroundDrawable(InsetDrawable(GradientDrawable().apply {
+                    setColor(Ink.paper)
+                    setStroke((1 * dp).toInt().coerceAtLeast(1), Ink.text)
+                    cornerRadius = 2 * dp
+                }, (16 * dp).toInt()))
+            }
         }
         dialog.show()
         return dialog
     }
 
     private fun showMessage(title: String, message: String) {
-        showPlain(AlertDialog.Builder(this).setTitle(title).setMessage(message).setPositiveButton("OK", null))
+        showPlain(dialog().setTitle(title).setMessage(message).setPositiveButton("OK", null))
     }
 
     // ---------------------------------------------------------------- dictionaries
 
     private fun showDictionaries() {
         val dicts = dictionaries.list()
-        val builder = AlertDialog.Builder(this)
+        val builder = dialog()
             .setTitle(if (dicts.isEmpty()) "Dictionaries" else "Dictionaries (tap to remove)")
             .setPositiveButton("Add…") { _, _ -> pickDictionary() }
             .setNegativeButton("Close", null)
@@ -1146,7 +1214,7 @@ class MainActivity : Activity() {
 
     private fun confirmRemove(dict: Dictionaries.Info) {
         showPlain(
-            AlertDialog.Builder(this)
+            dialog()
                 .setTitle("Remove dictionary?")
                 .setMessage(dict.name)
                 .setPositiveButton("Remove") { _, _ ->
@@ -1180,7 +1248,7 @@ class MainActivity : Activity() {
     }
 
     private fun installDictionaries(uris: List<Uri>) {
-        val busy = showPlain(AlertDialog.Builder(this).setMessage("Adding dictionary…").setCancelable(false))
+        val busy = showPlain(dialog().setMessage("Adding dictionary…").setCancelable(false))
         dictWorker.execute {
             val temp = File(cacheDir, "dict-import")
             val (title, message) = try {
@@ -1296,7 +1364,7 @@ class MainActivity : Activity() {
         if (dicts.isEmpty()) {
             pageView.clearSelection()
             showPlain(
-                AlertDialog.Builder(this)
+                dialog()
                     .setTitle("No dictionary")
                     .setMessage("Add a StarDict dictionary to look up words.")
                     .setPositiveButton("Add…") { _, _ -> pickDictionary() }
@@ -1478,7 +1546,7 @@ class MainActivity : Activity() {
                 "The text-to-speech engine has no $language voice, so another voice is used."
             }
             showPlain(
-                AlertDialog.Builder(this@MainActivity)
+                dialog()
                     .setTitle("Read aloud")
                     .setMessage(message)
                     .setPositiveButton("Voice settings") { _, _ -> openSpeechSettings() }
@@ -1533,21 +1601,21 @@ class MainActivity : Activity() {
         fun dp(v: Int) = (v * density).toInt()
         fun button(label: String, onClick: () -> Unit) = TextView(this).apply {
             text = label
-            setTextColor(Color.BLACK)
+            setTextColor(Ink.text)
             textSize = 16f
             gravity = Gravity.CENTER
             maxLines = 1
             setPadding(dp(4), dp(10), dp(4), dp(10))
             background = GradientDrawable().apply {
-                setColor(Color.WHITE)
-                setStroke(dp(1), Color.BLACK)
+                setColor(Ink.paper)
+                setStroke(dp(1), Ink.text)
                 cornerRadius = dp(4).toFloat()
             }
             setOnClickListener { onClick() }
         }
         playButton = button("Pause") { if (speaking) pauseReading() else resumeReading() }
         rateLabel = TextView(this).apply {
-            setTextColor(Color.BLACK)
+            setTextColor(Ink.text)
             textSize = 16f
             gravity = Gravity.CENTER
         }
@@ -1571,8 +1639,8 @@ class MainActivity : Activity() {
         updateReadAloudBar()
         return LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.WHITE)
-            addView(View(this@MainActivity).apply { setBackgroundColor(Color.BLACK) }, MATCH_PARENT, dp(1))
+            setBackgroundColor(Ink.paper)
+            addView(View(this@MainActivity).apply { setBackgroundColor(Ink.text) }, MATCH_PARENT, dp(1))
             addView(row, MATCH_PARENT, WRAP_CONTENT)
             visibility = View.GONE
         }
@@ -1644,7 +1712,7 @@ class MainActivity : Activity() {
             "($unit ${remote.position.chapter + 1} of $count), $whenRead.\n\n" +
             "This device is at ${(percentRead() * 100).toInt()}% ($unit ${here + 1})."
         showPlain(
-            AlertDialog.Builder(this)
+            dialog()
                 .setTitle("Continue from ${remote.device}?")
                 .setMessage(message)
                 .setPositiveButton("Go there") { _, _ ->
@@ -1665,7 +1733,7 @@ class MainActivity : Activity() {
     }
 
     private fun showFolderSettings() {
-        val builder = AlertDialog.Builder(this).setTitle("Sync books")
+        val builder = dialog().setTitle("Sync books")
         if (!sharedFolder.isEnabled) {
             builder.setMessage(
                 "Book can use a folder that a sync app, such as Syncthing or FolderSync, keeps the same on all " +
@@ -1696,7 +1764,7 @@ class MainActivity : Activity() {
 
     /** Starts using [tree] as the shared folder and copies the library's books into it. */
     private fun useSharedFolder(tree: Uri) {
-        val busy = showPlain(AlertDialog.Builder(this).setMessage("Copying your books to the folder…").setCancelable(false))
+        val busy = showPlain(dialog().setMessage("Copying your books to the folder…").setCancelable(false))
         folderWorker.execute {
             val (title, message) = try {
                 sharedFolder.set(tree)
@@ -1723,7 +1791,7 @@ class MainActivity : Activity() {
     private fun showSyncSettings() {
         if (!positionSync.isEnabled) return showSignIn()
         showPlain(
-            AlertDialog.Builder(this)
+            dialog()
                 .setTitle("Sync reading position")
                 .setMessage(
                     "Signed in as ${positionSync.username}\nServer: ${positionSync.server}\n\n" +
@@ -1775,7 +1843,7 @@ class MainActivity : Activity() {
             addView(status)
         }
         val dialog = showPlain(
-            AlertDialog.Builder(this)
+            dialog()
                 .setTitle("Sync reading position")
                 .setView(form)
                 .setPositiveButton("Sign in", null)

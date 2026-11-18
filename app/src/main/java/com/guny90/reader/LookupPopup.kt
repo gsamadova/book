@@ -55,7 +55,7 @@ class LookupPopup(
         val pad = dp(16)
 
         titleView = TextView(activity).apply {
-            setTextColor(Color.BLACK)
+            setTextColor(Ink.text)
             textSize = 22f
             typeface = Typeface.create(Typeface.SERIF, Typeface.BOLD)
         }
@@ -108,8 +108,8 @@ class LookupPopup(
         dialog.setOnDismissListener { onDismiss() }
         dialog.window?.apply {
             setBackgroundDrawable(GradientDrawable().apply {
-                setColor(Color.WHITE)
-                setStroke(dp(2), Color.BLACK)
+                setColor(Ink.paper)
+                setStroke(dp(2), Ink.text)
             })
             setWindowAnimations(0)
             clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
@@ -142,7 +142,7 @@ class LookupPopup(
 
     private fun text(value: CharSequence, italic: Boolean = false) = TextView(activity).apply {
         text = value
-        setTextColor(Color.BLACK)
+        setTextColor(Ink.text)
         textSize = 18f
         typeface = Typeface.create(Typeface.SERIF, if (italic) Typeface.ITALIC else Typeface.NORMAL)
         setLineSpacing(0f, 1.1f)
@@ -151,14 +151,14 @@ class LookupPopup(
     /** Bordered text "button": no ripple or gray states, which cost extra e-ink refreshes. */
     private fun button(label: String) = TextView(activity).apply {
         text = label
-        setTextColor(Color.BLACK)
+        setTextColor(Ink.text)
         textSize = 16f
         gravity = Gravity.CENTER
         setPadding(dp(6), dp(10), dp(6), dp(10))
         maxLines = 1
         background = GradientDrawable().apply {
-            setColor(Color.WHITE)
-            setStroke(dp(1), Color.BLACK)
+            setColor(Ink.paper)
+            setStroke(dp(1), Ink.text)
             cornerRadius = dp(4).toFloat()
         }
         isClickable = true

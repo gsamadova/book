@@ -2,4 +2,6 @@
 <resources>
     <color name="black">#FF000000</color>
     <color name="white">#FFFFFFFF</color>
+    <!-- Night mode text: a little softer than white on a dark room's screen. Keep in sync with Ink.NIGHT_TEXT. -->
+    <color name="night_text">#FFDDDDDD</color>
 </resources>
