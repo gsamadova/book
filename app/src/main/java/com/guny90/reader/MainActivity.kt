@@ -543,7 +543,10 @@ class MainActivity : Activity() {
                     // While reading aloud, a re-layout (e.g. the bar appearing) keeps the spoken sentence in view.
                     val spoken = spokenRange
                     val showAt = if (speaking && !speakAfterLoad && spoken != null) spoken.first else at
-                    showPage(result.pageForOffset(showAt))
+                    // [page] must belong to the new pages right away: showPage sets it only once the
+                    // page's pictures are decoded, and the code below (sync check, reading) uses it now.
+                    page = result.pageForOffset(showAt)
+                    showPage(page)
                     if (speakAfterLoad) {
                         speakAfterLoad = false
                         if (speaking) speakFrom(result.offsetOf(page))
@@ -566,7 +569,7 @@ class MainActivity : Activity() {
     /** Position to keep when re-paginating. While a chapter is loading, that's the load target. */
     private fun currentOffset(): Int {
         val p = pages
-        return if (p != null && !loading) p.offsetOf(page) else pendingOffset
+        return if (p != null && !loading) p.offsetOf(page.coerceIn(0, p.count - 1)) else pendingOffset
     }
 
     private fun onTextAreaLaidOut() {
