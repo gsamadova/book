@@ -24,6 +24,7 @@ Works on Android 7.0 and newer.
 - Tap a book to open it where you left off.
 - Tap **Add a new book…** at the top to pick a file from your device.
 - **Long-press a book** to remove it from the library. Its reading position is kept. You can't remove the book that is open: open another one first.
+- Books marked **↓** are in your shared folder but not on this device yet (see *Syncing your books*). Tap one to open it; long-press it to delete it from the shared folder.
 
 Book keeps its own copy of each book in the library, so the original file can be moved or deleted. When an 11th book is added, the oldest one leaves the library. Its reading position is remembered, so if you add it again it opens where you left off.
 
@@ -52,7 +53,7 @@ Tap the middle of the screen. The items depend on the book:
 - **Read aloud**
 - **Text**: text size, paragraph spacing, pictures.
 - **Words**: what selecting words does, and your dictionaries.
-- **Sync**: reading position sync.
+- **Sync**: reading position and book sync.
 - **Open book…**
 
 For PDFs: **Go to page…**, **Words** and **Colors**.
@@ -124,16 +125,31 @@ Text size and reading aloud are not available for PDFs.
 
 Book can keep your place in sync between devices, for example a phone and an e-ink reader. It uses a **KOReader sync server**, which also works with KOReader itself. The default server is `https://kosync.eu`.
 
-1. **Menu → Sync**
+1. **Menu → Sync → Reading position**
 2. The first time, tap **Create account**. On your other devices, enter the same username and password and tap **Sign in**.
 3. When you open a book on a device that is behind, Book asks whether to continue from the other device's position.
 
 Your position is uploaded when you leave the app or turn off the screen. **Sync now** checks right away. Both devices need the **same book file** for positions to match.
 
+## Syncing your books
+
+Book can make a book you open on one device show up in the Library on your others. It uses a folder that a sync app keeps the same on all your devices, such as [Syncthing](https://syncthing.net) (free, no account) or FolderSync.
+
+1. Set up the sync app on each device so that it syncs one folder, for example `Documents/Books`.
+2. In Book, **Menu → Sync → Books → Choose folder…**, and pick that folder. Do this on each device.
+3. Book copies the books in your Library into the folder. From then on, every book you add is copied there too.
+
+On your other devices, those books appear in the Library marked **↓**. Tap one to open it. If position sync is on, it opens where you left off.
+
+- You can also put `.epub` and `.pdf` files into the folder yourself.
+- Removing a book from a device's Library leaves it in the folder. To delete it from the folder, long-press it where it's marked ↓.
+- **Menu → Sync → Books → Stop using** stops copying. The folder and its books are left as they are.
+
 ## Troubleshooting
 
 - **"Could not open this book"**: the file may be damaged or DRM-protected. Book can't open DRM-protected books.
 - **A tap opens the wrong thing**: links take priority over page turns. Tap a little away from underlined text.
+- **A book from another device isn't in the Library**: check that the sync app has finished syncing the folder.
 - **No dictionary popup**: add a dictionary first (see *Adding dictionaries*).
 - **Google Translate isn't offered**: install the Google Translate app.
 - **Read aloud is silent or uses the wrong voice**: download the book's language voice in the text-to-speech settings.

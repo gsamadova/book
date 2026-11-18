@@ -131,19 +131,20 @@ class KoSync(
          * 0, 1K, 4K, 16K, … 1G. Identical files give identical ids on every device, whatever
          * their name, and only ~12 KB are read.
          */
-        fun partialMd5(file: File): String {
+        fun partialMd5(file: File): String = RandomAccessFile(file, "r").use { raf ->
+            partialMd5(raf.length()) { offset, buffer -> raf.seek(offset); raf.read(buffer, 0, buffer.size) }
+        }
+
+        /** [partialMd5] of [length] bytes read with [readAt] (returns the count read, or -1). */
+        fun partialMd5(length: Long, readAt: (offset: Long, buffer: ByteArray) -> Int): String {
             val md5 = MessageDigest.getInstance("MD5")
             val buffer = ByteArray(1024)
-            RandomAccessFile(file, "r").use { raf ->
-                val length = raf.length()
-                for (i in -1..10) {
-                    val offset = if (i < 0) 0L else 1024L shl (2 * i)
-                    if (offset >= length) break
-                    raf.seek(offset)
-                    val n = raf.read(buffer, 0, buffer.size)
-                    if (n <= 0) break
-                    md5.update(buffer, 0, n)
-                }
+            for (i in -1..10) {
+                val offset = if (i < 0) 0L else 1024L shl (2 * i)
+                if (offset >= length) break
+                val n = readAt(offset, buffer)
+                if (n <= 0) break
+                md5.update(buffer, 0, n)
             }
             return hex(md5.digest())
         }

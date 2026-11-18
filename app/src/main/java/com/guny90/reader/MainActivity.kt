@@ -37,6 +37,7 @@ import com.guny90.reader.dict.DefinitionText
 import com.guny90.reader.dict.Dictionaries
 import com.guny90.reader.sync.KoSync
 import com.guny90.reader.sync.PositionSync
+import com.guny90.reader.sync.SharedFolder
 import java.io.File
 import java.util.Locale
 import java.util.concurrent.Executors
@@ -54,6 +55,9 @@ class MainActivity : Activity() {
     private val syncWorker = Executors.newSingleThreadExecutor()
     /** Reads the words of PDF pages (for selecting them) without delaying page rendering. */
     private val wordsWorker = Executors.newSingleThreadExecutor()
+    /** Reads and writes the shared books folder, so a big copy never delays reading or the library. */
+    private val folderWorker = Executors.newSingleThreadExecutor()
+    private val sharedFolder by lazy { SharedFolder(this, prefs) }
     private val positionSync by lazy { PositionSync(prefs, deviceName()) }
     /** Book fingerprint (same on every device), used as the sync document id. */
     private var bookHash: String? = null
@@ -214,38 +218,103 @@ class MainActivity : Activity() {
         dictWorker.execute { dictionaries.closeAll() }
         dictWorker.shutdown()
         syncWorker.shutdown() // lets a pending upload finish
+        folderWorker.shutdown() // lets a copy to the shared folder finish
         speech?.shutdown()
         super.onDestroy()
     }
 
     // ---------------------------------------------------------------- opening books
 
-    /** The books opened on this device, most recent first, below "Add a new book…". */
+    /**
+     * The books opened on this device, most recent first, below "Add a new book…", then the
+     * books in the shared folder that aren't on this device yet.
+     */
     private fun showLibrary() {
-        val entries = library.entries()
-        if (entries.isEmpty()) return pickBook() // nothing to choose from yet
-        val open = currentFile?.name
-        val items = listOf("Add a new book…") + entries.map { e ->
-            (if (e.fileName == open) "\u25B8 " else "") + e.title + (if (e.isPdf) " (PDF)" else "")
+        if (!sharedFolder.isEnabled) return showLibrary(emptyList(), null)
+        folderWorker.execute {
+            val (shared, error) = try {
+                sharedFolder.books() to null
+            } catch (e: Exception) {
+                emptyList<SharedFolder.Book>() to e
+            }
+            mainHandler.post { if (!isFinishing) showLibrary(shared, error) }
         }
+    }
+
+    private fun showLibrary(shared: List<SharedFolder.Book>, folderError: Exception?) {
+        if (folderError != null) {
+            Toast.makeText(this, "Can't read the shared folder: ${folderError.message ?: folderError.javaClass.simpleName}", Toast.LENGTH_LONG).show()
+        }
+        val entries = library.entries()
+        val here = entries.map { it.fileName.substringBeforeLast('.') }.toSet()
+        val onlyShared = shared.filter { it.hash !in here }
+        if (entries.isEmpty() && onlyShared.isEmpty()) return pickBook() // nothing to choose from yet
+        val open = currentFile?.name
+        val items = listOf("Add a new book…") +
+            entries.map { e -> (if (e.fileName == open) "\u25B8 " else "") + e.title + (if (e.isPdf) " (PDF)" else "") } +
+            onlyShared.map { b -> "\u21E3 " + b.title + (if (b.isPdf) " (PDF)" else "") }
         val dialog = showPlain(
             AlertDialog.Builder(this)
                 .setTitle("Library (long-press to remove)")
                 .setItems(items.toTypedArray()) { _, i ->
-                    if (i == 0) pickBook()
-                    else if (entries[i - 1].fileName != open) openFromLibrary(entries[i - 1])
+                    when {
+                        i == 0 -> pickBook()
+                        i <= entries.size -> if (entries[i - 1].fileName != open) openFromLibrary(entries[i - 1])
+                        else -> openUri(onlyShared[i - 1 - entries.size].uri)
+                    }
                 }
         )
         dialog.listView.setOnItemLongClickListener { _, _, i, _ ->
-            if (i == 0) return@setOnItemLongClickListener false
-            val entry = entries[i - 1]
-            if (entry.fileName == open) {
-                Toast.makeText(this, "This book is open. Open another book first, then remove it.", Toast.LENGTH_LONG).show()
-            } else {
-                dialog.dismiss()
-                confirmRemove(entry)
+            when {
+                i == 0 -> return@setOnItemLongClickListener false
+                i <= entries.size -> {
+                    val entry = entries[i - 1]
+                    if (entry.fileName == open) {
+                        Toast.makeText(this, "This book is open. Open another book first, then remove it.", Toast.LENGTH_LONG).show()
+                    } else {
+                        dialog.dismiss()
+                        confirmRemove(entry)
+                    }
+                }
+                else -> {
+                    dialog.dismiss()
+                    confirmDeleteShared(onlyShared[i - 1 - entries.size])
+                }
             }
             true
+        }
+    }
+
+    private fun confirmDeleteShared(book: SharedFolder.Book) {
+        showPlain(
+            AlertDialog.Builder(this)
+                .setTitle("Delete from the shared folder?")
+                .setMessage("${book.name}\n\nThe sync app will delete it on your other devices' folders too. Books already in a device's library stay there.")
+                .setPositiveButton("Delete") { _, _ ->
+                    folderWorker.execute {
+                        val error = try { sharedFolder.delete(book); null } catch (e: Exception) { e }
+                        mainHandler.post {
+                            if (error != null) showMessage("Could not delete", error.message ?: error.javaClass.simpleName)
+                            else showLibrary()
+                        }
+                    }
+                }
+                .setNegativeButton("Cancel") { _, _ -> showLibrary() }
+                .setOnCancelListener { showLibrary() }
+        )
+    }
+
+    /** Copies a book just added to the library into the shared folder, if one is set. */
+    private fun shareBook(file: File, title: String, hash: String, isPdf: Boolean) {
+        if (!sharedFolder.isEnabled) return
+        folderWorker.execute {
+            try {
+                sharedFolder.add(file, title, hash, isPdf)
+            } catch (e: Exception) {
+                mainHandler.post {
+                    Toast.makeText(this, "Couldn't copy the book to the shared folder: ${e.message ?: e.javaClass.simpleName}", Toast.LENGTH_LONG).show()
+                }
+            }
         }
     }
 
@@ -291,6 +360,7 @@ class MainActivity : Activity() {
         if (resultCode != RESULT_OK || data == null) return
         when (requestCode) {
             REQUEST_OPEN -> data.data?.let { openUri(it) }
+            REQUEST_FOLDER -> data.data?.let { useSharedFolder(it) }
             REQUEST_DICTIONARY -> {
                 val clip = data.clipData
                 val uris = if (clip != null) (0 until clip.itemCount).map { clip.getItemAt(it).uri }
@@ -327,12 +397,14 @@ class MainActivity : Activity() {
                         ?.ifBlank { null } ?: "PDF"
                     val opened = PdfBook.open(target, title)
                     library.add(target, title)
+                    shareBook(target, title, hash, isPdf = true)
                     mainHandler.post {
                         if (id == jobId) setPdf(opened, hash, target) else worker.execute { opened.close() }
                     }
                 } else {
                     val opened = EpubBook.open(target)
                     library.add(target, opened.title)
+                    shareBook(target, opened.title, hash, isPdf = false)
                     mainHandler.post {
                         if (id == jobId) setBook(opened, hash, target) else worker.execute { opened.close() }
                     }
@@ -790,7 +862,7 @@ class MainActivity : Activity() {
             }
             else -> actions += "Dictionaries" to ::showDictionaries
         }
-        actions += "Sync: ${if (positionSync.isEnabled) positionSync.username else "Off"}" to ::showSyncSettings
+        actions += "Sync: positions ${onOff(positionSync.isEnabled)} · books ${onOff(sharedFolder.isEnabled)}" to ::showSyncMenu
         actions += "Open book…" to ::showLibrary
         showList(d?.title ?: b?.title ?: "Book", actions.map { it.first }) { actions[it].second() }
     }
@@ -1585,6 +1657,69 @@ class MainActivity : Activity() {
         )
     }
 
+    private fun showSyncMenu() {
+        showList("Sync", listOf(
+            "Reading position: ${if (positionSync.isEnabled) positionSync.username else "Off"}",
+            "Books: ${if (sharedFolder.isEnabled) sharedFolder.displayName else "Off"}",
+        )) { if (it == 0) showSyncSettings() else showFolderSettings() }
+    }
+
+    private fun showFolderSettings() {
+        val builder = AlertDialog.Builder(this).setTitle("Sync books")
+        if (!sharedFolder.isEnabled) {
+            builder.setMessage(
+                "Book can use a folder that a sync app, such as Syncthing or FolderSync, keeps the same on all " +
+                    "your devices. Books you open are copied into it, and books in it appear in the Library " +
+                    "on every device.\n\nSet up the sync app first, then choose its folder here, on each device."
+            )
+                .setPositiveButton("Choose folder…") { _, _ -> pickSharedFolder() }
+                .setNegativeButton("Cancel", null)
+        } else {
+            builder.setMessage(
+                "Folder: ${sharedFolder.displayName}\n\nBooks you open are copied into this folder, and books " +
+                    "in it appear in the Library (marked \u21E3) until you open them."
+            )
+                .setPositiveButton("Change folder…") { _, _ -> pickSharedFolder() }
+                .setNegativeButton("Stop using") { _, _ -> sharedFolder.clear() }
+                .setNeutralButton("Close", null)
+        }
+        showPlain(builder)
+    }
+
+    private fun pickSharedFolder() {
+        try {
+            startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT_TREE), REQUEST_FOLDER)
+        } catch (e: ActivityNotFoundException) {
+            showMessage("Sync books", "This device has no folder picker, so a shared folder can't be chosen.")
+        }
+    }
+
+    /** Starts using [tree] as the shared folder and copies the library's books into it. */
+    private fun useSharedFolder(tree: Uri) {
+        val busy = showPlain(AlertDialog.Builder(this).setMessage("Copying your books to the folder…").setCancelable(false))
+        folderWorker.execute {
+            val (title, message) = try {
+                sharedFolder.set(tree)
+                val before = sharedFolder.books().map { it.hash }.toSet()
+                var copied = 0
+                for (entry in library.entries()) {
+                    val hash = entry.fileName.substringBeforeLast('.')
+                    if (hash in before) continue
+                    sharedFolder.add(library.file(entry), entry.title, hash, entry.isPdf)
+                    copied++
+                }
+                "Sync books" to "Using the folder ${sharedFolder.displayName}.\n\n" +
+                    (if (copied == 0) "Your books were already there." else "Copied $copied ${if (copied == 1) "book" else "books"} into it.")
+            } catch (e: Exception) {
+                "Could not use this folder" to (e.message ?: e.javaClass.simpleName)
+            }
+            mainHandler.post {
+                busy.dismiss()
+                showMessage(title, message)
+            }
+        }
+    }
+
     private fun showSyncSettings() {
         if (!positionSync.isEnabled) return showSignIn()
         showPlain(
@@ -1701,6 +1836,7 @@ class MainActivity : Activity() {
     companion object {
         private const val REQUEST_OPEN = 1
         private const val REQUEST_DICTIONARY = 2
+        private const val REQUEST_FOLDER = 3
         private const val GOOGLE_TRANSLATE = "com.google.android.apps.translate"
         private const val MAX_DECODED_PICTURES = 6
         /** Followed links remembered for Back. */
