@@ -62,9 +62,9 @@ class MainActivity : Activity() {
     private lateinit var prefs: SharedPreferences
     private lateinit var pageView: PageView
 
-    private val bookFile by lazy { File(filesDir, "current.epub") }
-    /** The current book when it is a PDF (then [bookFile] doesn't exist). */
-    private val pdfFile by lazy { File(filesDir, "current.pdf") }
+    private val library by lazy { Library(File(filesDir, "library"), prefs) }
+    /** The open book's file (EPUB or PDF), in the library. */
+    private var currentFile: File? = null
     private val dictionaries by lazy { Dictionaries(File(filesDir, "dicts")) }
 
     // UI-thread state
@@ -220,6 +220,52 @@ class MainActivity : Activity() {
 
     // ---------------------------------------------------------------- opening books
 
+    /** The books opened on this device, most recent first, below "Add a new book…". */
+    private fun showLibrary() {
+        val entries = library.entries()
+        if (entries.isEmpty()) return pickBook() // nothing to choose from yet
+        val open = currentFile?.name
+        val items = listOf("Add a new book…") + entries.map { e ->
+            (if (e.fileName == open) "\u25B8 " else "") + e.title + (if (e.isPdf) " (PDF)" else "")
+        }
+        val dialog = showPlain(
+            AlertDialog.Builder(this)
+                .setTitle("Library (long-press to remove)")
+                .setItems(items.toTypedArray()) { _, i ->
+                    if (i == 0) pickBook()
+                    else if (entries[i - 1].fileName != open) openFromLibrary(entries[i - 1])
+                }
+        )
+        dialog.listView.setOnItemLongClickListener { _, _, i, _ ->
+            if (i == 0) return@setOnItemLongClickListener false
+            val entry = entries[i - 1]
+            if (entry.fileName == open) {
+                Toast.makeText(this, "This book is open. Open another book first, then remove it.", Toast.LENGTH_LONG).show()
+            } else {
+                dialog.dismiss()
+                confirmRemove(entry)
+            }
+            true
+        }
+    }
+
+    private fun confirmRemove(entry: Library.Entry) {
+        showPlain(
+            AlertDialog.Builder(this)
+                .setTitle("Remove from library?")
+                .setMessage("${entry.title}\n\nIts reading position is kept, so if you add it again it opens where you left off.")
+                .setPositiveButton("Remove") { _, _ ->
+                    worker.execute { // deletes the file: not on the main thread
+                        library.remove(entry)
+                        val left = library.entries().isNotEmpty()
+                        mainHandler.post { if (left) showLibrary() }
+                    }
+                }
+                .setNegativeButton("Cancel") { _, _ -> showLibrary() }
+                .setOnCancelListener { showLibrary() }
+        )
+    }
+
     private fun pickBook() {
         val open = Intent(Intent.ACTION_OPEN_DOCUMENT)
             .addCategory(Intent.CATEGORY_OPENABLE)
@@ -265,28 +311,30 @@ class MainActivity : Activity() {
                 val input = contentResolver.openInputStream(uri) ?: error("Cannot read file")
                 input.use { inp -> tmp.outputStream().use { inp.copyTo(it, 64 * 1024) } }
                 val isPdf = PdfBook.isPdf(tmp)
-                // Validate before replacing the current book.
+                // Validate before adding it to the library.
                 if (isPdf) PdfBook.open(tmp, "").close() else EpubBook.open(tmp).close()
-                val target = if (isPdf) pdfFile else bookFile
-                if (!tmp.renameTo(target)) {
+                val hash = KoSync.partialMd5(tmp)
+                val target = library.fileFor(hash, isPdf)
+                if (target.exists()) {
+                    tmp.delete() // the same book is already in the library (maybe open right now)
+                } else if (!tmp.renameTo(target)) {
                     tmp.copyTo(target, overwrite = true)
                     tmp.delete()
                 }
-                (if (isPdf) bookFile else pdfFile).delete() // only one current book
-                val hash = KoSync.partialMd5(target)
                 if (isPdf) {
                     // A PDF's title isn't readable without a library: use the file name.
                     val title = displayName(uri)?.let { if (it.endsWith(".pdf", true)) it.dropLast(4) else it }
                         ?.ifBlank { null } ?: "PDF"
-                    prefs.edit().putString("pdf_title", title).apply()
-                    val opened = PdfBook.open(pdfFile, title)
+                    val opened = PdfBook.open(target, title)
+                    library.add(target, title)
                     mainHandler.post {
-                        if (id == jobId) setPdf(opened, hash) else worker.execute { opened.close() }
+                        if (id == jobId) setPdf(opened, hash, target) else worker.execute { opened.close() }
                     }
                 } else {
-                    val opened = EpubBook.open(bookFile)
+                    val opened = EpubBook.open(target)
+                    library.add(target, opened.title)
                     mainHandler.post {
-                        if (id == jobId) setBook(opened, hash) else worker.execute { opened.close() }
+                        if (id == jobId) setBook(opened, hash, target) else worker.execute { opened.close() }
                     }
                 }
             } catch (e: Exception) {
@@ -300,29 +348,67 @@ class MainActivity : Activity() {
         }
     }
 
+    /** Opens the most recent book of the library, if any. */
     private fun restoreLastBook() {
-        val file = listOf(bookFile, pdfFile).filter { it.exists() }.maxByOrNull { it.lastModified() }
-        if (file == null) {
-            pageView.showMessage("Book\n\nTap the middle of the screen\nto open an .epub or .pdf book.")
-            return
+        val id = ++jobId
+        loading = true
+        worker.execute {
+            migrateCurrentBook()
+            val entry = library.entries().firstOrNull()
+            mainHandler.post {
+                if (id != jobId) return@post
+                loading = false
+                if (entry != null) openFromLibrary(entry)
+                else pageView.showMessage("Book\n\nTap the middle of the screen\nto open an .epub or .pdf book.")
+            }
         }
+    }
+
+    /**
+     * Worker thread. Before the library, only one book was kept, as current.epub or current.pdf: it becomes the
+     * library's first book. Positions are kept, as they don't depend on the file's name.
+     */
+    private fun migrateCurrentBook() {
+        for (old in listOf(File(filesDir, "current.epub"), File(filesDir, "current.pdf"))) {
+            if (!old.exists()) continue
+            try {
+                val isPdf = old.name.endsWith(".pdf")
+                val target = library.fileFor(KoSync.partialMd5(old), isPdf)
+                if (!old.renameTo(target)) {
+                    old.copyTo(target, overwrite = true)
+                    old.delete()
+                }
+                val title = if (isPdf) prefs.getString("pdf_title", null) ?: "PDF"
+                else EpubBook.open(target).use { it.title }
+                library.add(target, title)
+            } catch (e: Exception) {
+                // unreadable: leave it; the library starts empty
+            }
+        }
+        prefs.edit().remove("pdf_title").apply()
+    }
+
+    private fun openFromLibrary(entry: Library.Entry) {
+        val file = library.file(entry)
         val id = ++jobId
         loading = true
         pageView.showMessage("Opening…")
         worker.execute {
             try {
                 val hash = KoSync.partialMd5(file)
-                if (file == pdfFile) {
-                    val opened = PdfBook.open(pdfFile, prefs.getString("pdf_title", null) ?: "PDF")
-                    mainHandler.post { if (id == jobId) setPdf(opened, hash) else worker.execute { opened.close() } }
+                if (entry.isPdf) {
+                    val opened = PdfBook.open(file, entry.title)
+                    mainHandler.post { if (id == jobId) setPdf(opened, hash, file) else worker.execute { opened.close() } }
                 } else {
-                    val opened = EpubBook.open(bookFile)
-                    mainHandler.post { if (id == jobId) setBook(opened, hash) else worker.execute { opened.close() } }
+                    val opened = EpubBook.open(file)
+                    mainHandler.post { if (id == jobId) setBook(opened, hash, file) else worker.execute { opened.close() } }
                 }
+                library.touch(entry)
             } catch (e: Exception) {
                 mainHandler.post {
+                    if (id != jobId) return@post
                     loading = false
-                    pageView.showMessage("Tap the middle of the screen\nto open an .epub or .pdf book.")
+                    pageView.showMessage("Could not open ${entry.title}.\n${e.message ?: e.javaClass.simpleName}\n\nTap the middle to open another book.")
                 }
             }
         }
@@ -365,12 +451,13 @@ class MainActivity : Activity() {
         cacheDir.listFiles { f -> f.name.startsWith("PDFBox") }?.forEach { it.delete() }
     }
 
-    private fun setPdf(newPdf: PdfBook, hash: String) {
+    private fun setPdf(newPdf: PdfBook, hash: String, file: File) {
         closeCurrentBook()
         pdf = newPdf
-        pdfWords = PdfWords(applicationContext, pdfFile)
+        currentFile = file
+        pdfWords = PdfWords(applicationContext, file)
         showTitleInRecents(newPdf.title)
-        bookKey = "pos_" + (newPdf.title + "|" + pdfFile.length()).hashCode()
+        bookKey = "pos_" + (newPdf.title + "|" + file.length()).hashCode()
         chapterText = null
         pages = null
         bookHash = hash
@@ -379,11 +466,12 @@ class MainActivity : Activity() {
         showPdfPage(saved)
     }
 
-    private fun setBook(newBook: EpubBook, hash: String) {
+    private fun setBook(newBook: EpubBook, hash: String, file: File) {
         closeCurrentBook()
         book = newBook
+        currentFile = file
         showTitleInRecents(newBook.title)
-        bookKey = "pos_" + (newBook.title + "|" + bookFile.length()).hashCode()
+        bookKey = "pos_" + (newBook.title + "|" + file.length()).hashCode()
         chapterText = null
         pages = null
         val saved = prefs.getString(bookKey, null)?.split(':')
@@ -700,7 +788,7 @@ class MainActivity : Activity() {
             else -> actions += "Dictionaries" to ::showDictionaries
         }
         actions += "Sync: ${if (positionSync.isEnabled) positionSync.username else "Off"}" to ::showSyncSettings
-        actions += "Open book…" to ::pickBook
+        actions += "Open book…" to ::showLibrary
         showList(d?.title ?: b?.title ?: "Book", actions.map { it.first }) { actions[it].second() }
     }
 

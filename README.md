@@ -14,11 +14,20 @@ Works on Android 7.0 and newer.
 
 ## Opening a book
 
-- On first start, tap the **middle of the screen** and pick an `.epub` or `.pdf` file.
+- On first start, tap the **middle of the screen**, then **Open book…**, and pick an `.epub` or `.pdf` file.
 - Or open a book from your file manager with **Book**.
-- To switch books later: **Menu → Open book…**
 
-Book shows one book at a time. When you come back to a book, it opens where you left off.
+### Library
+
+**Menu → Open book…** shows your library: the last 10 books you opened on this device, most recent first. The book that is open now is marked with ▸.
+
+- Tap a book to open it where you left off.
+- Tap **Add a new book…** at the top to pick a file from your device.
+- **Long-press a book** to remove it from the library. Its reading position is kept. You can't remove the book that is open: open another one first.
+
+Book keeps its own copy of each book in the library, so the original file can be moved or deleted. When an 11th book is added, the oldest one leaves the library. Its reading position is remembered, so if you add it again it opens where you left off.
+
+When the app starts, it opens the book you read last.
 
 ## Turning pages
 
