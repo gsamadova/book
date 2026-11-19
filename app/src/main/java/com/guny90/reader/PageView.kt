@@ -10,6 +10,7 @@ import android.graphics.ColorMatrixColorFilter
 import android.graphics.Paint
 import android.graphics.RectF
 import android.graphics.Typeface
+import android.os.Build
 import android.text.Layout
 import android.text.SpannableStringBuilder
 import android.text.Spanned
@@ -21,6 +22,7 @@ import android.text.TextUtils
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
+import java.util.Locale
 
 /** A chapter laid out once, split into pages by line index. */
 class Pages(val layout: StaticLayout, private val starts: IntArray) {
@@ -43,6 +45,10 @@ class Pages(val layout: StaticLayout, private val starts: IntArray) {
         /** Runs on a background thread. The cheap break strategy matters a lot on slow e-ink CPUs. */
         /** Extra space after each paragraph, as a fraction of the text size (menu choices). */
         val PARAGRAPH_SPACINGS = listOf("None" to 0f, "Small" to 0.35f, "Medium" to 0.7f, "Large" to 1.1f)
+        /** Line height as a multiple of the font's (menu choices). */
+        val LINE_SPACINGS = listOf("Tight" to 1.0f, "Normal" to 1.15f, "Relaxed" to 1.35f, "Loose" to 1.6f)
+        /** Page margins in dp (menu choices). */
+        val MARGINS = listOf("Narrow" to 8, "Medium" to 16, "Wide" to 32)
 
         /**
          * [pictureSize] (null: pictures off) gives a picture's pixel size; it is then drawn in place
@@ -51,6 +57,9 @@ class Pages(val layout: StaticLayout, private val starts: IntArray) {
         fun paginate(
             chapter: CharSequence, width: Int, height: Int, textSizePx: Float, paragraphSpacing: Float,
             pictureSize: ((String) -> IntArray?)? = null, pixelScale: Float = 1f, typeface: Typeface = Typeface.SERIF,
+            lineSpacing: Float = 1.15f,
+            /** Justified lines, hyphenated in [locale]'s language (Android 8 and newer). */
+            justify: Boolean = false, locale: Locale? = null,
         ): Pages {
             val text = SpannableStringBuilder(chapter)
             val gap = (paragraphSpacing * textSizePx).toInt()
@@ -58,7 +67,7 @@ class Pages(val layout: StaticLayout, private val starts: IntArray) {
             if (pictureSize != null) {
                 val pad = (0.3f * textSizePx).toInt()
                 // A picture is one line, so it must fit on one page together with its spacing.
-                val maxHeight = ((height - 2 * pad - gap * LINE_SPACING) / LINE_SPACING).toInt() - 2
+                val maxHeight = ((height - 2 * pad - gap * lineSpacing) / lineSpacing).toInt() - 2
                 for (ref in text.getSpans(0, text.length, HtmlText.ImageRef::class.java)) {
                     val size = pictureSize(ref.path) ?: continue
                     val w = size[0] * pixelScale
@@ -66,6 +75,7 @@ class Pages(val layout: StaticLayout, private val starts: IntArray) {
                     val fit = minOf(1f, width / w, maxHeight / h)
                     val picture = PictureSpan(
                         ref.path, (w * fit).toInt().coerceAtLeast(1), (h * fit).toInt().coerceAtLeast(1), width, pad,
+                        lineSpacing,
                     )
                     text.setSpan(picture, text.getSpanStart(ref), text.getSpanEnd(ref), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
                 }
@@ -76,14 +86,18 @@ class Pages(val layout: StaticLayout, private val starts: IntArray) {
                 linkColor = Ink.text // default is transparent: links (e.g. TOC pages) would be invisible
                 textSize = textSizePx
                 this.typeface = typeface
+                if (locale != null) textLocale = locale // hyphenation patterns of the book's language
             }
-            val layout = StaticLayout.Builder.obtain(text, 0, text.length, paint, width)
+            val justified = justify && Build.VERSION.SDK_INT >= 26
+            val builder = StaticLayout.Builder.obtain(text, 0, text.length, paint, width)
                 .setAlignment(Layout.Alignment.ALIGN_NORMAL)
-                .setLineSpacing(0f, LINE_SPACING)
+                .setLineSpacing(0f, lineSpacing)
                 .setIncludePad(false)
-                .setBreakStrategy(Layout.BREAK_STRATEGY_SIMPLE)
-                .setHyphenationFrequency(Layout.HYPHENATION_FREQUENCY_NONE)
-                .build()
+                // Only the slower strategies hyphenate; without hyphens, justified lines get wide gaps.
+                .setBreakStrategy(if (justified) Layout.BREAK_STRATEGY_HIGH_QUALITY else Layout.BREAK_STRATEGY_SIMPLE)
+                .setHyphenationFrequency(if (justified) Layout.HYPHENATION_FREQUENCY_NORMAL else Layout.HYPHENATION_FREQUENCY_NONE)
+            if (justified) builder.setJustificationMode(Layout.JUSTIFICATION_MODE_INTER_WORD)
+            val layout = builder.build()
 
             val starts = ArrayList<Int>()
             starts.add(0)
@@ -97,7 +111,6 @@ class Pages(val layout: StaticLayout, private val starts: IntArray) {
             return Pages(layout, starts.toIntArray())
         }
 
-        const val LINE_SPACING = 1.15f
     }
 
     /** Pictures on [page] that still need decoding (see [PictureSpan.bitmap]). */
@@ -132,6 +145,7 @@ class PictureSpan(
     val height: Int,
     private val lineWidth: Int,
     private val pad: Int,
+    private val lineSpacing: Float,
 ) : ReplacementSpan() {
     @Volatile var bitmap: Bitmap? = null
     @Volatile var failed = false
@@ -139,7 +153,7 @@ class PictureSpan(
     override fun getSize(paint: Paint, text: CharSequence?, start: Int, end: Int, fm: Paint.FontMetricsInt?): Int {
         if (fm != null) {
             // The layout multiplies line heights by its line spacing; divide so the line is just the picture.
-            val lineHeight = ((height + 2 * pad) / Pages.LINE_SPACING).toInt()
+            val lineHeight = ((height + 2 * pad) / lineSpacing).toInt()
             fm.ascent = -lineHeight
             fm.top = -lineHeight
             fm.descent = 0
@@ -229,7 +243,12 @@ class PageView(context: Context) : View(context) {
     private var spoken: IntRange? = null
 
     private val density = resources.displayMetrics.density
-    private val margin = (16 * density).toInt()
+    /** Space around the text (not PDF pages). Re-paginate after changing it: it changes [textWidth]. */
+    var margin = (16 * density).toInt()
+        set(value) {
+            field = value
+            invalidate()
+        }
     /** PDF pages bring their own margins (cropped to a little padding), so only a thin one here. */
     private val imageMargin = (4 * density).toInt()
     private val statusHeight = (28 * density).toInt()

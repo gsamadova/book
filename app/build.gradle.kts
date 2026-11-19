@@ -20,14 +20,25 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    // The release key lives outside the repo. Set BOOK_STORE_FILE, BOOK_STORE_PASSWORD and
+    // BOOK_KEY_ALIAS in ~/.gradle/gradle.properties; without them, release builds are unsigned.
+    // It's the same key that signed 1.0 and 1.1, so updates install over those versions.
+    val storeFile = providers.gradleProperty("BOOK_STORE_FILE").orNull
+    signingConfigs {
+        if (storeFile != null) create("release") {
+            this.storeFile = file(storeFile)
+            storePassword = providers.gradleProperty("BOOK_STORE_PASSWORD").get()
+            keyAlias = providers.gradleProperty("BOOK_KEY_ALIAS").get()
+            keyPassword = storePassword
+        }
+    }
+
     buildTypes {
         release {
             // R8 strips the unused parts of PdfBox: a much smaller APK.
             isMinifyEnabled = true
             isShrinkResources = true
-            // Same key as debug builds, so a release APK installs over a debug one, keeping
-            // books, positions and settings. Fine for a personal app that isn't published.
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.findByName("release")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"

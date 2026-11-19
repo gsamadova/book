@@ -21,6 +21,7 @@ Works on Android 7.0 and newer.
 
 **Menu → Open book…** shows your library: the last 10 books you opened on this device, most recent first. The book that is open now is marked with ▸.
 
+- Each book shows how much of it you've read.
 - Tap a book to open it where you left off.
 - Tap **Add a new book…** at the top to pick a file from your device.
 - **Long-press a book** to remove it from the library. Its reading position is kept. You can't remove the book that is open: open another one first.
@@ -42,7 +43,9 @@ The screen is split into three columns:
 
 The **volume keys** turn pages too: down for next, up for previous. Page-turn buttons and keyboard arrows also work.
 
-The bottom line shows the book title, the page within the chapter and the chapter number.
+The bottom line shows the book title, the page within the chapter, the chapter number, and how much of the whole book you've read. Long chapters count for more than short ones, so a cover page doesn't count as a whole chapter.
+
+While you read, the screen stays on, even if your phone normally turns it off sooner. After 5 minutes without turning a page, your usual screen timeout applies again.
 
 ## The menu
 
@@ -51,7 +54,7 @@ Tap the middle of the screen. The items depend on the book:
 - **Back to where you were**: appears after you follow a link (see below).
 - **Contents**: the book's table of contents.
 - **Read aloud**
-- **Text**: font, text size, paragraph spacing, pictures.
+- **Text**: font, text size, spacing, margins, justified text, pictures.
 - **Words**: what selecting words does, and your dictionaries.
 - **Sync**: reading position and book sync.
 - **Night mode**
@@ -65,7 +68,10 @@ For PDFs: **Go to page…**, **Words**, **Colors**, and at night **Invert pages 
 
 - **Font**: Serif, Literata (a font made for reading on screens), Sans-serif, Condensed (fits more words on a line) or Monospace.
 - **Larger text / Smaller text**: changes the size in steps of 2. The menu stays open, so you can tap again.
+- **Line spacing**: Tight, Normal, Relaxed or Loose.
 - **Paragraph spacing**: None, Small, Medium or Large.
+- **Margins**: Narrow, Medium or Wide.
+- **Justify: On / Off**: lines fill the full width, as in a printed book, and long words are hyphenated in the book's language. Pages take a little longer to lay out. Needs Android 8 or newer.
 - **Pictures: On / Off**: shows or hides the pictures in the book. Your place in the book stays the same either way.
 - **Picture colors: Gray / Original**: Gray suits black-and-white e-ink screens. Choose Original on a phone, tablet or color screen.
 
@@ -171,5 +177,15 @@ Kotlin, platform APIs only (no WebView). Open in Android Studio, or build from t
 ```sh
 ./gradlew assembleRelease   # app/build/outputs/apk/release/app-release.apk
 ```
+
+Release builds are signed with a key kept outside the repository. Set its location and password in `~/.gradle/gradle.properties`:
+
+```properties
+BOOK_STORE_FILE=/path/to/book-release.p12
+BOOK_STORE_PASSWORD=...
+BOOK_KEY_ALIAS=book
+```
+
+Without these, release builds are unsigned. Updates only install over an app signed with the same key, so keep a backup of the key file and its password.
 
 `tools/sjp_to_stardict.py` converts the SJP.pl Polish dictionary to StarDict. See the comment at the top of the script.

@@ -35,6 +35,21 @@ class EpubBook private constructor(
         return zip.getInputStream(entry).use { it.readBytes().toString(Charsets.UTF_8) }
     }
 
+    /** Each chapter's size in bytes: its share of the book, for the percentage read. */
+    val chapterSizes: LongArray by lazy {
+        LongArray(spine.size) { zip.getEntry(spine[it])?.size?.coerceAtLeast(0L) ?: 0L }
+    }
+
+    /** How far into the book a reader is who has read [inChapter] (0 to 1) of chapter [chapter]. */
+    fun fractionRead(chapter: Int, inChapter: Double): Double {
+        val sizes = chapterSizes
+        val total = sizes.sum()
+        if (total <= 0L || chapter !in sizes.indices) return ((chapter + inChapter) / spine.size).coerceIn(0.0, 1.0)
+        var before = 0L
+        for (i in 0 until chapter) before += sizes[i]
+        return ((before + sizes[chapter] * inChapter) / total).coerceIn(0.0, 1.0)
+    }
+
     private val pictureSizes = HashMap<String, IntArray?>()
 
     /** Pixel size of a picture, read from its header only; null if missing or unreadable. */

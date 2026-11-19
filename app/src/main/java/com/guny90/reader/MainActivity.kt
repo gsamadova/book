@@ -115,6 +115,10 @@ class MainActivity : Activity() {
     private var fontIndex = 0
     /** In night mode, PDF pages are inverted (good for text, odd for pictures). */
     private var invertPdfAtNight = true
+    /** Indexes into [Pages.LINE_SPACINGS] and [Pages.MARGINS]. */
+    private var lineSpacing = 1
+    private var marginIndex = 1
+    private var justify = false
     @Volatile private var jobId = 0 // also read on the worker, to skip superseded PDF renders
     private var laidOutW = 0
     private var laidOutH = 0
@@ -154,12 +158,16 @@ class MainActivity : Activity() {
         grayPictures = prefs.getBoolean("gray_pictures", true)
         Ink.night = prefs.getBoolean("night", false)
         invertPdfAtNight = prefs.getBoolean("night_invert_pdf", true)
+        lineSpacing = prefs.getInt("line_spacing", 1).coerceIn(0, Pages.LINE_SPACINGS.lastIndex)
+        marginIndex = prefs.getInt("margin", 1).coerceIn(0, Pages.MARGINS.lastIndex)
+        justify = prefs.getBoolean("justify", false) && Build.VERSION.SDK_INT >= 26
         fontIndex = prefs.getInt("font", 0).coerceIn(0, Fonts.names.lastIndex)
         PictureSpan.setColors(grayPictures, Ink.night && invertPdfAtNight)
         volumeControlStream = AudioManager.STREAM_MUSIC
         removeOldPdfText()
 
         pageView = PageView(this)
+        pageView.margin = (Pages.MARGINS[marginIndex].second * resources.displayMetrics.density).toInt()
         controls = buildReadAloudBar()
         root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -262,7 +270,10 @@ class MainActivity : Activity() {
         if (entries.isEmpty() && onlyShared.isEmpty()) return pickBook() // nothing to choose from yet
         val open = currentFile?.name
         val items = listOf("Add a new book…") +
-            entries.map { e -> (if (e.fileName == open) "\u25B8 " else "") + e.title + (if (e.isPdf) " (PDF)" else "") } +
+            entries.map { e ->
+                (if (e.fileName == open) "\u25B8 " else "") + e.title + (if (e.isPdf) " (PDF)" else "") +
+                    (savedPercent(e)?.let { " \u00B7 $it%" } ?: "")
+            } +
             onlyShared.map { b -> "\u21E3 " + b.title + (if (b.isPdf) " (PDF)" else "") }
         val dialog = showPlain(
             dialog()
@@ -608,6 +619,9 @@ class MainActivity : Activity() {
         )
         val pictures = showPictures
         val typeface = Fonts.typeface(this, fontIndex)
+        val lineHeight = Pages.LINE_SPACINGS[lineSpacing].second
+        val justified = justify
+        val locale = bookLocale()
         // Picture pixels are CSS pixels: as large as on a phone screen, then fitted to the page.
         val pixelScale = resources.displayMetrics.density
         worker.execute {
@@ -617,7 +631,9 @@ class MainActivity : Activity() {
                 val text = content.text
                 val at = anchor?.let { findAnchor(content.anchors, it) } ?: offset
                 val pictureSize: ((String) -> IntArray?)? = if (pictures) b::pictureSize else null
-                val result = Pages.paginate(text, w, h, textPx, spacing, pictureSize, pixelScale, typeface)
+                val result = Pages.paginate(
+                    text, w, h, textPx, spacing, pictureSize, pixelScale, typeface, lineHeight, justified, locale,
+                )
                 mainHandler.post {
                     if (id != jobId) return@post
                     chapterText = text
@@ -687,9 +703,10 @@ class MainActivity : Activity() {
         pageView.showPage(
             p, page,
             statusLeft = b.title,
-            statusRight = "${page + 1}/${p.count}   ch ${chapter + 1}/${b.spine.size}",
+            statusRight = "${page + 1}/${p.count}   ch ${chapter + 1}/${b.spine.size}   ${percentShown()}%",
         )
-        prefs.edit().putString(bookKey, "$chapter:${p.offsetOf(page)}").apply()
+        prefs.edit().putString(bookKey, "$chapter:${p.offsetOf(page)}").putInt(progressKey, percentShown()).apply()
+        stayAwake()
     }
 
     /**
@@ -722,13 +739,14 @@ class MainActivity : Activity() {
                 loading = false
                 val rendered = result.getOrNull()
                 if (rendered != null) {
-                    pageView.showImage(rendered, d.title, "${target + 1}/${d.pageCount}")
+                    pageView.showImage(rendered, d.title, "${target + 1}/${d.pageCount}   ${pdfPercent(target, d)}%")
+                    stayAwake()
                     loadWords(target)
                 } else {
                     val e = result.exceptionOrNull()
                     pageView.showMessage("Could not show page ${target + 1}.\n${e?.message ?: e?.javaClass?.simpleName ?: ""}")
                 }
-                prefs.edit().putString(bookKey, "$target:0").apply()
+                prefs.edit().putString(bookKey, "$target:0").putInt(progressKey, pdfPercent(target, d)).apply()
                 if (syncCheckPending) {
                     syncCheckPending = false
                     checkRemotePosition()
@@ -844,6 +862,20 @@ class MainActivity : Activity() {
         }
     }
 
+    private val allowScreenOff = Runnable {
+        if (!speaking) window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+    }
+
+    /**
+     * Keeps the screen on while you read: the phone's screen timeout (often 30 s) is shorter than
+     * a page. After [AWAKE_MS] without turning a page, the usual timeout applies again.
+     */
+    private fun stayAwake() {
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        mainHandler.removeCallbacks(allowScreenOff)
+        mainHandler.postDelayed(allowScreenOff, AWAKE_MS)
+    }
+
     private fun dialog() =
         if (Ink.night) AlertDialog.Builder(this, R.style.Theme_Reader_Dialog_Night) else AlertDialog.Builder(this)
 
@@ -931,7 +963,24 @@ class MainActivity : Activity() {
         actions += "Larger text (${fontSp + 2})" to { changeFont(+2); showTextMenu() }
         actions += "Smaller text (${fontSp - 2})" to { changeFont(-2); showTextMenu() }
         actions += "Font: ${Fonts.names[fontIndex]}" to ::chooseFont
+        actions += "Line spacing: ${Pages.LINE_SPACINGS[lineSpacing].first}" to {
+            chooseLayoutOption("Line spacing", Pages.LINE_SPACINGS.map { it.first }, lineSpacing, "line_spacing") {
+                lineSpacing = it
+            }
+        }
         actions += "Paragraph spacing: ${spacingName()}" to ::chooseParagraphSpacing
+        actions += "Margins: ${Pages.MARGINS[marginIndex].first}" to {
+            chooseLayoutOption("Margins", Pages.MARGINS.map { it.first }, marginIndex, "margin") {
+                marginIndex = it
+                pageView.margin = (Pages.MARGINS[it].second * resources.displayMetrics.density).toInt()
+            }
+        }
+        if (Build.VERSION.SDK_INT >= 26) actions += "Justify: ${if (justify) "On" else "Off"}" to {
+            justify = !justify
+            prefs.edit().putBoolean("justify", justify).apply()
+            loadChapter(chapter, currentOffset())
+            showTextMenu()
+        }
         actions += "Pictures: ${if (showPictures) "On" else "Off"}" to { togglePictures(); showTextMenu() }
         if (showPictures) {
             actions += "Picture colors: ${pictureColorsName()}" to { togglePictureColors(); showTextMenu() }
@@ -951,6 +1000,16 @@ class MainActivity : Activity() {
 
     private fun spacingName() = Pages.PARAGRAPH_SPACINGS[paragraphSpacing].first
     private fun onOff(on: Boolean) = if (on) "on" else "off"
+
+    /** A text layout choice saved under [key]; the chapter is laid out again, keeping the position. */
+    private fun chooseLayoutOption(title: String, names: List<String>, selected: Int, key: String, apply: (Int) -> Unit) {
+        chooseOption(title, names, selected) { i ->
+            if (i == selected) return@chooseOption
+            apply(i)
+            prefs.edit().putInt(key, i).apply()
+            loadChapter(chapter, currentOffset())
+        }
+    }
 
     private fun chooseParagraphSpacing() {
         val names = Pages.PARAGRAPH_SPACINGS.map { it.first }.toTypedArray()
@@ -1471,6 +1530,7 @@ class MainActivity : Activity() {
         val p = pages ?: return
         speaking = true
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) // the screen timeout would stop it
+        mainHandler.removeCallbacks(allowScreenOff)
         updateReadAloudBar()
         if (loading) {
             speakAfterLoad = true
@@ -1495,7 +1555,7 @@ class MainActivity : Activity() {
         speakAfterLoad = false
         mainHandler.removeCallbacks(restartAtNewRate)
         speech?.stop()
-        window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        stayAwake()
         updateReadAloudBar()
     }
 
@@ -1661,10 +1721,34 @@ class MainActivity : Activity() {
     /** Rough share of the book read, for showing "45%" on the other device. */
     private fun percentRead(): Double {
         pdf?.let { return ((pdfPage + 1).toDouble() / it.pageCount).coerceIn(0.0, 1.0) }
-        val chapters = book?.spine?.size ?: return 0.0
+        val b = book ?: return 0.0
         val length = chapterText?.length ?: 0
         val inChapter = if (length > 0) (currentOffset().toDouble() / length).coerceIn(0.0, 1.0) else 0.0
-        return ((chapter + inChapter) / chapters).coerceIn(0.0, 1.0)
+        return b.fractionRead(chapter, inChapter)
+    }
+
+    /**
+     * Percent of the book read once this page is read: counts up to the page's end, so the last
+     * page shows 100%. Chapters count by their size, so a short cover page counts for little.
+     */
+    private fun percentShown(): Int {
+        val b = book ?: return 0
+        val p = pages ?: return 0
+        val length = chapterText?.length ?: 0
+        val end = if (page + 1 < p.count) p.offsetOf(page + 1) else length
+        val inChapter = if (length > 0) (end.toDouble() / length).coerceIn(0.0, 1.0) else 1.0
+        return (b.fractionRead(chapter, inChapter) * 100).toInt()
+    }
+
+    private fun pdfPercent(page: Int, d: PdfBook) = (page + 1) * 100 / d.pageCount.coerceAtLeast(1)
+
+    /** Where the percentage read is kept for the Library (next to the position, [bookKey]). */
+    private val progressKey get() = bookKey.replaceFirst("pos_", "pct_")
+
+    /** The percentage read of a library book, as saved when it was last open; null if unknown. */
+    private fun savedPercent(entry: Library.Entry): Int? {
+        val key = "pct_" + (entry.title + "|" + library.file(entry).length()).hashCode()
+        return if (prefs.contains(key)) prefs.getInt(key, 0) else null
     }
 
     /** Uploads the position in the background; failures (e.g. no Wi-Fi) are retried next time. */
@@ -1905,6 +1989,8 @@ class MainActivity : Activity() {
         private const val REQUEST_OPEN = 1
         private const val REQUEST_DICTIONARY = 2
         private const val REQUEST_FOLDER = 3
+        /** How long the screen stays on after the last page turn. */
+        private const val AWAKE_MS = 5 * 60 * 1000L
         private const val GOOGLE_TRANSLATE = "com.google.android.apps.translate"
         private const val MAX_DECODED_PICTURES = 6
         /** Followed links remembered for Back. */
