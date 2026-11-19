@@ -62,6 +62,8 @@ Tap the middle of the screen. The items depend on the book:
 
 For PDFs: **Go to page…**, **Words**, **Colors**, and at night **Invert pages at night**.
 
+In a submenu, the **Back** button or gesture goes up one level, for example from *Paragraph spacing* to *Text*, then to the main menu. Tapping outside a menu closes it.
+
 ## Text and pictures
 
 **Menu → Text**:

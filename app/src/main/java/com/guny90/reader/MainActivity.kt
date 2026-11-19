@@ -284,7 +284,8 @@ class MainActivity : Activity() {
                         i <= entries.size -> if (entries[i - 1].fileName != open) openFromLibrary(entries[i - 1])
                         else -> openUri(onlyShared[i - 1 - entries.size].uri)
                     }
-                }
+                },
+            ::showMenu,
         )
         dialog.listView.setOnItemLongClickListener { _, _, i, _ ->
             when {
@@ -854,7 +855,7 @@ class MainActivity : Activity() {
     }
 
     private fun chooseFont() {
-        chooseOption("Font", Fonts.names, fontIndex) { i ->
+        chooseOption("Font", Fonts.names, fontIndex, ::showTextMenu) { i ->
             if (i == fontIndex) return@chooseOption
             fontIndex = i
             prefs.edit().putInt("font", i).apply()
@@ -949,7 +950,7 @@ class MainActivity : Activity() {
                 actions += "Text: ${Fonts.names[fontIndex]} $fontSp · ${spacingName()} spacing · pictures ${onOff(showPictures)}" to ::showTextMenu
                 actions += "Words: ${oneWordAction.label} · ${severalWordsAction.label}" to ::showWordsMenu
             }
-            else -> actions += "Dictionaries" to ::showDictionaries
+            else -> actions += "Dictionaries" to { showDictionaries(::showMenu) }
         }
         actions += "Sync: positions ${onOff(positionSync.isEnabled)} · books ${onOff(sharedFolder.isEnabled)}" to ::showSyncMenu
         actions += "Night mode: ${if (Ink.night) "On" else "Off"}" to { toggleNight(); showMenu() }
@@ -985,7 +986,7 @@ class MainActivity : Activity() {
         if (showPictures) {
             actions += "Picture colors: ${pictureColorsName()}" to { togglePictureColors(); showTextMenu() }
         }
-        showList("Text", actions.map { it.first }) { actions[it].second() }
+        showList("Text", actions.map { it.first }, back = ::showMenu) { actions[it].second() }
     }
 
     /** What selecting words does, and the dictionaries used for it. */
@@ -994,8 +995,8 @@ class MainActivity : Activity() {
         val actions = ArrayList<Pair<String, () -> Unit>>()
         actions += "One word: ${oneWordAction.label}" to ::chooseOneWordAction
         actions += "Several words: ${severalWordsAction.label}" to ::chooseSeveralWordsAction
-        actions += "Dictionaries (${if (count == 0) "none" else count})" to ::showDictionaries
-        showList("Words", actions.map { it.first }) { actions[it].second() }
+        actions += "Dictionaries (${if (count == 0) "none" else count})" to { showDictionaries(::showWordsMenu) }
+        showList("Words", actions.map { it.first }, back = ::showMenu) { actions[it].second() }
     }
 
     private fun spacingName() = Pages.PARAGRAPH_SPACINGS[paragraphSpacing].first
@@ -1003,7 +1004,7 @@ class MainActivity : Activity() {
 
     /** A text layout choice saved under [key]; the chapter is laid out again, keeping the position. */
     private fun chooseLayoutOption(title: String, names: List<String>, selected: Int, key: String, apply: (Int) -> Unit) {
-        chooseOption(title, names, selected) { i ->
+        chooseOption(title, names, selected, ::showTextMenu) { i ->
             if (i == selected) return@chooseOption
             apply(i)
             prefs.edit().putInt(key, i).apply()
@@ -1023,32 +1024,34 @@ class MainActivity : Activity() {
                         prefs.edit().putInt("paragraph_spacing", which).apply()
                         loadChapter(chapter, currentOffset()) // same text, new layout: position is kept
                     }
-                }
+                },
+            ::showTextMenu,
         )
     }
 
     private fun chooseOneWordAction() {
-        chooseOption("When one word is selected", OneWord.entries.map { it.label }, oneWordAction.ordinal) {
+        chooseOption("When one word is selected", OneWord.entries.map { it.label }, oneWordAction.ordinal, ::showWordsMenu) {
             oneWordAction = OneWord.entries[it]
             prefs.edit().putString("one_word_action", oneWordAction.name).apply()
         }
     }
 
     private fun chooseSeveralWordsAction() {
-        chooseOption("When several words are selected", SeveralWords.entries.map { it.label }, severalWordsAction.ordinal) {
+        chooseOption("When several words are selected", SeveralWords.entries.map { it.label }, severalWordsAction.ordinal, ::showWordsMenu) {
             severalWordsAction = SeveralWords.entries[it]
             prefs.edit().putString("several_words_action", severalWordsAction.name).apply()
         }
     }
 
-    private fun chooseOption(title: String, names: List<String>, selected: Int, onPick: (Int) -> Unit) {
+    private fun chooseOption(title: String, names: List<String>, selected: Int, back: () -> Unit, onPick: (Int) -> Unit) {
         showPlain(
             dialog()
                 .setTitle(title)
                 .setSingleChoiceItems(names.toTypedArray(), selected) { dialog, which ->
                     dialog.dismiss()
                     onPick(which)
-                }
+                },
+            back,
         )
     }
 
@@ -1057,7 +1060,7 @@ class MainActivity : Activity() {
         val entries = b.toc.ifEmpty {
             b.spine.indices.map { EpubBook.TocEntry("Chapter ${it + 1}", it) }
         }
-        showList("Contents", entries.map { it.title }) {
+        showList("Contents", entries.map { it.title }, back = ::showMenu) {
             val entry = entries[it]
             val p = pages
             val offset = entry.anchor?.let { a -> findAnchor(chapterAnchors, a) }
@@ -1207,7 +1210,8 @@ class MainActivity : Activity() {
                 .setTitle("Go to page")
                 .setView(form)
                 .setPositiveButton("Go") { _, _ -> go() }
-                .setNegativeButton("Cancel", null)
+                .setNegativeButton("Cancel", null),
+            ::showMenu,
         )
         input.setOnEditorActionListener { _, _, _ ->
             dialog.dismiss()
@@ -1218,16 +1222,23 @@ class MainActivity : Activity() {
         dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE)
     }
 
-    private fun showList(title: String, items: List<String>, onCancel: (() -> Unit)? = null, onPick: (Int) -> Unit) {
+    private fun showList(
+        title: String, items: List<String>, onCancel: (() -> Unit)? = null, back: (() -> Unit)? = null,
+        onPick: (Int) -> Unit,
+    ) {
         val builder = dialog()
             .setTitle(title)
             .setItems(items.toTypedArray()) { _, which -> onPick(which) }
         if (onCancel != null) builder.setOnCancelListener { onCancel() }
-        showPlain(builder)
+        showPlain(builder, back)
     }
 
-    /** Shows a dialog without animation or gray dimming (each costs an extra e-ink refresh). */
-    private fun showPlain(builder: AlertDialog.Builder): AlertDialog {
+    /**
+     * Shows a dialog without animation or gray dimming (each costs an extra e-ink refresh).
+     * With [back], the Back button or gesture closes it and calls [back] (to show the menu it
+     * was opened from); tapping outside still closes it altogether.
+     */
+    private fun showPlain(builder: AlertDialog.Builder, back: (() -> Unit)? = null): AlertDialog {
         val dialog = builder.create()
         dialog.window?.apply {
             setWindowAnimations(0)
@@ -1243,7 +1254,30 @@ class MainActivity : Activity() {
             }
         }
         dialog.show()
+        if (back != null) onBack(dialog, back)
         return dialog
+    }
+
+    private fun onBack(dialog: AlertDialog, back: () -> Unit) {
+        var done = false
+        fun goUp() {
+            if (done) return
+            done = true
+            dialog.dismiss()
+            back()
+        }
+        // Android 13+ with the back gesture: registered after show(), so it runs instead of the dialog's own.
+        if (Build.VERSION.SDK_INT >= 33) {
+            dialog.onBackInvokedDispatcher.registerOnBackInvokedCallback(
+                android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT,
+            ) { goUp() }
+        }
+        // Older versions, and the Back key.
+        dialog.setOnKeyListener { _, keyCode, event ->
+            if (keyCode != KeyEvent.KEYCODE_BACK) return@setOnKeyListener false
+            if (event.action == KeyEvent.ACTION_UP && !event.isCanceled) goUp()
+            true
+        }
     }
 
     private fun showMessage(title: String, message: String) {
@@ -1252,7 +1286,8 @@ class MainActivity : Activity() {
 
     // ---------------------------------------------------------------- dictionaries
 
-    private fun showDictionaries() {
+    /** The dictionaries list; Back returns to [parent]. */
+    private fun showDictionaries(parent: () -> Unit) {
         val dicts = dictionaries.list()
         val builder = dialog()
             .setTitle(if (dicts.isEmpty()) "Dictionaries" else "Dictionaries (tap to remove)")
@@ -1265,13 +1300,13 @@ class MainActivity : Activity() {
             )
         } else {
             builder.setItems(dicts.map { "${it.name}  (${it.words} words)" }.toTypedArray()) { _, i ->
-                confirmRemove(dicts[i])
+                confirmRemove(dicts[i], parent)
             }
         }
-        showPlain(builder)
+        showPlain(builder, parent)
     }
 
-    private fun confirmRemove(dict: Dictionaries.Info) {
+    private fun confirmRemove(dict: Dictionaries.Info, parent: () -> Unit) {
         showPlain(
             dialog()
                 .setTitle("Remove dictionary?")
@@ -1279,11 +1314,11 @@ class MainActivity : Activity() {
                 .setPositiveButton("Remove") { _, _ ->
                     dictWorker.execute {
                         dictionaries.remove(dict.id)
-                        mainHandler.post(::showDictionaries)
+                        mainHandler.post { showDictionaries(parent) }
                     }
                 }
-                .setNegativeButton("Cancel", null)
-        )
+                .setNegativeButton("Cancel", null),
+        ) { showDictionaries(parent) }
     }
 
     private fun pickDictionary() {
@@ -1813,7 +1848,7 @@ class MainActivity : Activity() {
         showList("Sync", listOf(
             "Reading position: ${if (positionSync.isEnabled) positionSync.username else "Off"}",
             "Books: ${if (sharedFolder.isEnabled) sharedFolder.displayName else "Off"}",
-        )) { if (it == 0) showSyncSettings() else showFolderSettings() }
+        ), back = ::showMenu) { if (it == 0) showSyncSettings() else showFolderSettings() }
     }
 
     private fun showFolderSettings() {
@@ -1835,7 +1870,7 @@ class MainActivity : Activity() {
                 .setNegativeButton("Stop using") { _, _ -> sharedFolder.clear() }
                 .setNeutralButton("Close", null)
         }
-        showPlain(builder)
+        showPlain(builder, ::showSyncMenu)
     }
 
     private fun pickSharedFolder() {
@@ -1885,7 +1920,8 @@ class MainActivity : Activity() {
                 )
                 .setPositiveButton("Sync now") { _, _ -> syncNow() }
                 .setNegativeButton("Sign out") { _, _ -> positionSync.signOut() }
-                .setNeutralButton("Close", null)
+                .setNeutralButton("Close", null),
+            ::showSyncMenu,
         )
     }
 
@@ -1932,7 +1968,8 @@ class MainActivity : Activity() {
                 .setView(form)
                 .setPositiveButton("Sign in", null)
                 .setNeutralButton("Create account", null)
-                .setNegativeButton("Cancel", null)
+                .setNegativeButton("Cancel", null),
+            ::showSyncMenu,
         )
         // Own click handling so the dialog stays open while connecting and on errors.
         fun submit(register: Boolean) {
