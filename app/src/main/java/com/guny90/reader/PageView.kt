@@ -527,8 +527,8 @@ class PageView(context: Context) : View(context) {
             while (start < end && text[start].isWhitespace()) start++
             while (end > start && text[end - 1].isWhitespace()) end--
             if (start >= end) continue
-            val left = layout.getPrimaryHorizontal(start)
-            val right = if (end >= layout.getLineEnd(line)) layout.getLineRight(line) else layout.getPrimaryHorizontal(end)
+            val left = TextPositions.x(layout, line, start)
+            val right = if (end >= layout.getLineEnd(line)) layout.getLineRight(line) else TextPositions.x(layout, line, end)
             action(line, minOf(left, right), maxOf(left, right))
         }
     }
@@ -661,7 +661,7 @@ class PageView(context: Context) : View(context) {
         val top = layout.getLineTop(p.startLine(page))
         val bottom = layout.getLineTop(p.endLine(page))
         val ly = ((y - paddingTop - margin).toInt() + top).coerceIn(top, bottom - 1)
-        return layout.getOffsetForHorizontal(layout.getLineForVertical(ly), x - paddingLeft - margin)
+        return TextPositions.offsetAt(layout, layout.getLineForVertical(ly), x - paddingLeft - margin)
     }
 
     /**
@@ -724,7 +724,7 @@ class PageView(context: Context) : View(context) {
         val lx = x - paddingLeft - margin
         if (lx < layout.getLineLeft(line) - margin || lx > layout.getLineRight(line) + margin) return null
 
-        return wordAround(text, layout.getOffsetForHorizontal(line, lx))
+        return wordAround(text, TextPositions.offsetAt(layout, line, lx))
     }
 
     /** The word containing [position] (or ending right before it), or null between words. */
@@ -749,5 +749,69 @@ class PageView(context: Context) : View(context) {
         if (c.isLetterOrDigit() || Character.getType(c) == Character.NON_SPACING_MARK.toInt()) return true
         // Apostrophes and hyphens count only inside a word: "don't", "well-known".
         return isJoiner(c) && i > 0 && i + 1 < text.length && text[i - 1].isLetter() && text[i + 1].isLetter()
+    }
+}
+
+/**
+ * Horizontal positions in a [Layout] that may have justified lines. Android's own
+ * [Layout.getPrimaryHorizontal] and [Layout.getOffsetForHorizontal] ignore the space that
+ * justification adds between words (as of Android 15), so a selection drawn with them sits too
+ * far left and a tap finds the wrong word. These add that space back.
+ */
+object TextPositions {
+
+    /** The x of [offset], which is on [line]. */
+    fun x(layout: Layout, line: Int, offset: Int): Float {
+        val x = layout.getPrimaryHorizontal(offset)
+        val gap = justifyGap(layout, line)
+        if (gap == 0f) return x
+        val text = layout.text
+        var spaces = 0
+        for (i in layout.getLineStart(line) until offset) if (text[i] == ' ') spaces++
+        return x + gap * spaces
+    }
+
+    /** The character offset on [line] nearest to [x]. */
+    fun offsetAt(layout: Layout, line: Int, x: Float): Int {
+        if (justifyGap(layout, line) == 0f) return layout.getOffsetForHorizontal(line, x)
+        val text = layout.text
+        val start = layout.getLineStart(line)
+        var end = layout.getLineEnd(line)
+        while (end > start && text[end - 1].isWhitespace()) end--
+        var best = start
+        var bestDistance = Float.MAX_VALUE
+        for (i in start..end) {
+            if (i < text.length && Character.isLowSurrogate(text[i]) && i > start) continue
+            val d = Math.abs(x(layout, line, i) - x)
+            if (d < bestDistance) {
+                best = i
+                bestDistance = d
+            }
+        }
+        return best
+    }
+
+    /** The width justification adds to (or takes from) each space on [line], if Android's positions leave it out; else 0. */
+    fun justifyGap(layout: Layout, line: Int): Float {
+        if (Build.VERSION.SDK_INT < 26 || layout.justificationMode == Layout.JUSTIFICATION_MODE_NONE) return 0f
+        if (line >= layout.lineCount - 1) return 0f // a paragraph's last line isn't stretched
+        if (layout.getParagraphDirection(line) != Layout.DIR_LEFT_TO_RIGHT) return 0f
+        val text = layout.text
+        val start = layout.getLineStart(line)
+        val lineEnd = layout.getLineEnd(line)
+        if (lineEnd > start && text[lineEnd - 1] == '\n') return 0f
+        var end = lineEnd
+        while (end > start && text[end - 1].isWhitespace()) end--
+        var spaces = 0
+        for (i in start until end) if (text[i] == ' ') spaces++
+        if (spaces == 0) return 0f
+        // A word broken across lines gets a hyphen that isn't in the text but takes up width.
+        val hyphen = if (end == lineEnd && end < text.length && text[end - 1].isLetter() && text[end].isLetter()) {
+            layout.paint.measureText("-")
+        } else 0f
+        val extra = layout.getParagraphRight(line) - layout.getPrimaryHorizontal(end) - hyphen
+        // Lines are stretched to fit, or squeezed a little when slightly too long. Nearly no
+        // difference means Android already counts the gaps.
+        return if (Math.abs(extra) > 0.5f) extra / spaces else 0f
     }
 }
