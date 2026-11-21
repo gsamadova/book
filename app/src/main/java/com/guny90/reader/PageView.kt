@@ -98,6 +98,7 @@ class Pages(val layout: StaticLayout, private val starts: IntArray) {
                 .setHyphenationFrequency(if (justified) Layout.HYPHENATION_FREQUENCY_NORMAL else Layout.HYPHENATION_FREQUENCY_NONE)
             if (justified) builder.setJustificationMode(Layout.JUSTIFICATION_MODE_INTER_WORD)
             val layout = builder.build()
+            if (justified) TextPositions.markJustified(layout)
 
             val starts = ArrayList<Int>()
             starts.add(0)
@@ -759,41 +760,67 @@ class PageView(context: Context) : View(context) {
  * far left and a tap finds the wrong word. These add that space back.
  */
 object TextPositions {
+    /** Layouts built justified: before Android 15 a layout can't tell (see [isJustified]). */
+    private val justified = java.util.Collections.newSetFromMap(java.util.WeakHashMap<Layout, Boolean>())
+
+    /** Records that [layout] was built with inter-word justification. */
+    @Synchronized
+    fun markJustified(layout: Layout) {
+        justified.add(layout)
+    }
+
+    /**
+     * Whether [layout]'s lines are justified. [Layout.getJustificationMode] exists only on
+     * Android 15+: calling it on older devices crashes the app, so there it's looked up instead.
+     */
+    @Synchronized
+    fun isJustified(layout: Layout): Boolean =
+        layout in justified || (Build.VERSION.SDK_INT >= 35 && layout.justificationMode != Layout.JUSTIFICATION_MODE_NONE)
 
     /** The x of [offset], which is on [line]. */
-    fun x(layout: Layout, line: Int, offset: Int): Float {
+    fun x(layout: Layout, line: Int, offset: Int): Float = x(layout, layout.getLineStart(line), offset, justifyGap(layout, line))
+
+    private fun x(layout: Layout, lineStart: Int, offset: Int, gap: Float): Float {
         val x = layout.getPrimaryHorizontal(offset)
-        val gap = justifyGap(layout, line)
         if (gap == 0f) return x
         val text = layout.text
         var spaces = 0
-        for (i in layout.getLineStart(line) until offset) if (text[i] == ' ') spaces++
+        for (i in lineStart until offset) if (text[i] == ' ') spaces++
         return x + gap * spaces
     }
 
-    /** The character offset on [line] nearest to [x]. */
+    /**
+     * The character offset on [line] nearest to [x]. Justified lines are left-to-right (see
+     * [justifyGap]), so positions grow with the offset: a binary search measures only a few of
+     * them. Measuring every character was slow on e-ink CPUs, and it runs on each finger move.
+     */
     fun offsetAt(layout: Layout, line: Int, x: Float): Int {
-        if (justifyGap(layout, line) == 0f) return layout.getOffsetForHorizontal(line, x)
+        val gap = justifyGap(layout, line)
+        if (gap == 0f) return layout.getOffsetForHorizontal(line, x)
         val text = layout.text
         val start = layout.getLineStart(line)
         var end = layout.getLineEnd(line)
         while (end > start && text[end - 1].isWhitespace()) end--
-        var best = start
-        var bestDistance = Float.MAX_VALUE
-        for (i in start..end) {
-            if (i < text.length && Character.isLowSurrogate(text[i]) && i > start) continue
-            val d = Math.abs(x(layout, line, i) - x)
-            if (d < bestDistance) {
-                best = i
-                bestDistance = d
-            }
+        // Never between the two halves of a surrogate pair.
+        fun valid(i: Int) = if (i > start && i < text.length && Character.isLowSurrogate(text[i])) i - 1 else i
+        // The first offset at or right of x.
+        var lo = start
+        var hi = end
+        while (lo < hi) {
+            val mid = (lo + hi) ushr 1
+            if (x(layout, start, valid(mid), gap) < x) lo = mid + 1 else hi = mid
         }
-        return best
+        val after = valid(lo)
+        if (after <= start) return start
+        val before = valid(after - 1)
+        val dAfter = Math.abs(x(layout, start, after, gap) - x)
+        val dBefore = Math.abs(x(layout, start, before, gap) - x)
+        return if (dBefore <= dAfter) before else after
     }
 
     /** The width justification adds to (or takes from) each space on [line], if Android's positions leave it out; else 0. */
     fun justifyGap(layout: Layout, line: Int): Float {
-        if (Build.VERSION.SDK_INT < 26 || layout.justificationMode == Layout.JUSTIFICATION_MODE_NONE) return 0f
+        if (Build.VERSION.SDK_INT < 26 || !isJustified(layout)) return 0f
         if (line >= layout.lineCount - 1) return 0f // a paragraph's last line isn't stretched
         if (layout.getParagraphDirection(line) != Layout.DIR_LEFT_TO_RIGHT) return 0f
         val text = layout.text

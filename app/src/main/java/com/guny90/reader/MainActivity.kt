@@ -9,6 +9,7 @@ import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.SharedPreferences
 import android.graphics.Color
+import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.InsetDrawable
 import android.media.AudioManager
@@ -17,7 +18,9 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.Process
 import android.provider.OpenableColumns
+import android.provider.Settings
 import android.speech.tts.TextToSpeech
 import android.util.TypedValue
 import android.text.InputType
@@ -59,6 +62,18 @@ class MainActivity : Activity() {
     private val wordsWorker = Executors.newSingleThreadExecutor()
     /** Reads and writes the shared books folder, so a big copy never delays reading or the library. */
     private val folderWorker = Executors.newSingleThreadExecutor()
+    /**
+     * Lays out the next chapter while the current one is read, so turning into it is instant.
+     * Low priority: it only uses the CPU when reading doesn't need it.
+     */
+    private val prefetchWorker = Executors.newSingleThreadExecutor { task ->
+        Thread({
+            prefetchThreadId = Process.myTid()
+            Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND)
+            task.run()
+        }, "prefetch")
+    }
+    @Volatile private var prefetchThreadId = 0
     private val sharedFolder by lazy { SharedFolder(this, prefs) }
     private val positionSync by lazy { PositionSync(prefs, deviceName()) }
     /** Book fingerprint (same on every device), used as the sync document id. */
@@ -92,6 +107,19 @@ class MainActivity : Activity() {
     /** The chapter last read for showing a note from another chapter (worker thread only). */
     private var noteChapter: Pair<Int, HtmlText.Chapter>? = null
     private var pages: Pages? = null
+    /** How [pages] was laid out: a ready chapter is used only if laid out the same way. */
+    private var pagesLayout: TextLayout? = null
+    /** The chapter [pages] belongs to ([chapter] already changes while the next one loads). */
+    private var shownChapter = -1
+    /** Chapters next to the open one, laid out ahead (main thread only). */
+    private val readyChapters = ArrayList<ReadyChapter>()
+    /** Bumped to drop a layout ahead that's still running (the book or the layout changed). */
+    @Volatile private var prefetchGen = 0
+    /** The chapter being laid out ahead right now, and how (main thread only). */
+    private var prefetching: Pair<Int, TextLayout>? = null
+    /** A load waiting for the chapter being laid out ahead, instead of laying it out a second time. */
+    private var awaitingPrefetch: AwaitedChapter? = null
+    private class AwaitedChapter(val jobId: Int, val offset: Int, val anchor: String?)
     private var page = 0
     private var pendingOffset = 0
     private var fontSp = 20
@@ -145,6 +173,7 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        ErrorLog.catchCrashes(this)
         window.setWindowAnimations(0)
         prefs = getSharedPreferences("reader", MODE_PRIVATE)
         fontSp = prefs.getInt("font_sp", 20)
@@ -203,6 +232,42 @@ class MainActivity : Activity() {
 
         val uri = intent?.data
         if (uri != null && savedInstanceState == null) openUri(uri) else restoreLastBook()
+        askForLogAccess()
+    }
+
+    /**
+     * Once: asks for the storage access that error logs in local/book/logs need. Without it,
+     * they go to the app's own folder (the error message says where).
+     */
+    private fun askForLogAccess() {
+        if (ErrorLog.canWriteShared(this) || prefs.getBoolean("asked_log_access", false)) return
+        prefs.edit().putBoolean("asked_log_access", true).apply()
+        val settings = Build.VERSION.SDK_INT >= 30
+        showPlain(
+            dialog()
+                .setTitle("Error logs")
+                .setMessage(
+                    "If something goes wrong, Book saves the details in ${ErrorLog.sharedDir().path.substringAfter("/0/")} " +
+                        "on this device. That needs access to its storage." +
+                        (if (settings) "\n\nIn the next screen, turn on \"Allow access to manage all files\"." else "")
+                )
+                .setPositiveButton("Allow") { _, _ ->
+                    if (settings) {
+                        try {
+                            startActivity(Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:$packageName")))
+                        } catch (e: ActivityNotFoundException) {
+                            try {
+                                startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
+                            } catch (e2: ActivityNotFoundException) {
+                                Toast.makeText(this, "This device has no setting for it: logs stay in the app's folder.", Toast.LENGTH_LONG).show()
+                            }
+                        }
+                    } else {
+                        requestPermissions(arrayOf(android.Manifest.permission.WRITE_EXTERNAL_STORAGE), REQUEST_LOG_ACCESS)
+                    }
+                }
+                .setNegativeButton("Not now", null),
+        )
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -237,6 +302,8 @@ class MainActivity : Activity() {
         dictWorker.execute { dictionaries.closeAll() }
         dictWorker.shutdown()
         syncWorker.shutdown() // lets a pending upload finish
+        prefetchGen++
+        prefetchWorker.shutdown()
         folderWorker.shutdown() // lets a copy to the shared folder finish
         speech?.shutdown()
         super.onDestroy()
@@ -333,7 +400,8 @@ class MainActivity : Activity() {
         folderWorker.execute {
             try {
                 sharedFolder.add(file, title, hash, isPdf)
-            } catch (e: Exception) {
+            } catch (e: Throwable) {
+                ErrorLog.write(this, "Copying to the shared folder: $title", e)
                 mainHandler.post {
                     Toast.makeText(this, "Couldn't copy the book to the shared folder: ${e.message ?: e.javaClass.simpleName}", Toast.LENGTH_LONG).show()
                 }
@@ -399,13 +467,18 @@ class MainActivity : Activity() {
         loading = true
         pageView.showMessage("Opening…")
         worker.execute {
+            // What was being done, for the error message and log.
+            var step = "reading the file"
+            val name = try { displayName(uri) } catch (e: Exception) { null } ?: uri.toString()
             try {
                 val tmp = File(filesDir, "incoming")
                 val input = contentResolver.openInputStream(uri) ?: error("Cannot read file")
                 input.use { inp -> tmp.outputStream().use { inp.copyTo(it, 64 * 1024) } }
+                step = "checking it (${tmp.length() / 1024} KB)"
                 val isPdf = PdfBook.isPdf(tmp)
                 // Validate before adding it to the library.
                 if (isPdf) PdfBook.open(tmp, "").close() else EpubBook.open(tmp).close()
+                step = "storing it in the library"
                 val hash = KoSync.partialMd5(tmp)
                 val target = library.fileFor(hash, isPdf)
                 if (target.exists()) {
@@ -414,6 +487,7 @@ class MainActivity : Activity() {
                     tmp.copyTo(target, overwrite = true)
                     tmp.delete()
                 }
+                step = "opening it"
                 if (isPdf) {
                     // A PDF's title isn't readable without a library: use the file name.
                     val title = displayName(uri)?.let { if (it.endsWith(".pdf", true)) it.dropLast(4) else it }
@@ -422,25 +496,48 @@ class MainActivity : Activity() {
                     library.add(target, title)
                     shareBook(target, title, hash, isPdf = true)
                     mainHandler.post {
-                        if (id == jobId) setPdf(opened, hash, target) else worker.execute { opened.close() }
+                        if (id == jobId) showingBook(name, id) { setPdf(opened, hash, target) } else worker.execute { opened.close() }
                     }
                 } else {
                     val opened = EpubBook.open(target)
                     library.add(target, opened.title)
                     shareBook(target, opened.title, hash, isPdf = false)
                     mainHandler.post {
-                        if (id == jobId) setBook(opened, hash, target) else worker.execute { opened.close() }
+                        if (id == jobId) showingBook(name, id) { setBook(opened, hash, target) } else worker.execute { opened.close() }
                     }
                 }
-            } catch (e: Exception) {
+            } catch (e: Throwable) { // also out of memory, which would otherwise close the app
+                val message = logError("Adding a book: $name, while $step", e, "Adding this book failed while $step.")
                 mainHandler.post {
                     if (id == jobId) {
                         loading = false
-                        pageView.showMessage("Could not open this book.\n${e.message ?: e.javaClass.simpleName}\n\nTap the middle to try another.")
+                        pageView.showMessage("$message\n\nTap the middle to try another.")
                     }
                 }
             }
         }
+    }
+
+    /** Shows a book just opened by [show]; if that fails, says so instead of closing the app. */
+    private fun showingBook(name: String, id: Int, show: () -> Unit) {
+        try {
+            show()
+        } catch (e: Throwable) {
+            val message = logError("Showing the book: $name", e, "Could not show this book.")
+            if (id == jobId) {
+                loading = false
+                pageView.showMessage("$message\n\nTap the middle to open another book.")
+            }
+        }
+    }
+
+    /**
+     * Saves [error] with its details to the error log and returns a message for the screen:
+     * [headline], the error in short, and where the details are.
+     */
+    private fun logError(what: String, error: Throwable, headline: String): String {
+        val saved = ErrorLog.write(this, what, error)
+        return "$headline\n${ErrorLog.summary(error)}" + (saved?.let { "\n\nDetails are saved in\n$it" } ?: "")
     }
 
     /** Opens the most recent book of the library, if any. */
@@ -493,17 +590,18 @@ class MainActivity : Activity() {
                 val hash = KoSync.partialMd5(file)
                 if (entry.isPdf) {
                     val opened = PdfBook.open(file, entry.title)
-                    mainHandler.post { if (id == jobId) setPdf(opened, hash, file) else worker.execute { opened.close() } }
+                    mainHandler.post { if (id == jobId) showingBook(entry.title, id) { setPdf(opened, hash, file) } else worker.execute { opened.close() } }
                 } else {
                     val opened = EpubBook.open(file)
-                    mainHandler.post { if (id == jobId) setBook(opened, hash, file) else worker.execute { opened.close() } }
+                    mainHandler.post { if (id == jobId) showingBook(entry.title, id) { setBook(opened, hash, file) } else worker.execute { opened.close() } }
                 }
                 library.touch(entry)
-            } catch (e: Exception) {
+            } catch (e: Throwable) {
+                val message = logError("Opening from the library: ${entry.title}", e, "Could not open ${entry.title}.")
                 mainHandler.post {
                     if (id != jobId) return@post
                     loading = false
-                    pageView.showMessage("Could not open ${entry.title}.\n${e.message ?: e.javaClass.simpleName}\n\nTap the middle to open another book.")
+                    pageView.showMessage("$message\n\nTap the middle to open another book.")
                 }
             }
         }
@@ -521,6 +619,11 @@ class MainActivity : Activity() {
         val oldBook = book
         val oldPdf = pdf
         val oldWords = pdfWords
+        prefetchGen++
+        prefetching = null
+        awaitingPrefetch = null
+        readyChapters.clear()
+        pagesLayout = null
         book = null
         pdf = null
         pdfWords = null
@@ -614,58 +717,138 @@ class MainActivity : Activity() {
         laidOutH = h
         val id = ++jobId
         loading = true
-        val spacing = Pages.PARAGRAPH_SPACINGS[paragraphSpacing].second
-        val textPx = TypedValue.applyDimension(
-            TypedValue.COMPLEX_UNIT_SP, fontSp.toFloat(), resources.displayMetrics
+        val layout = TextLayout(
+            w, h,
+            textPx = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, fontSp.toFloat(), resources.displayMetrics),
+            paragraphSpacing = Pages.PARAGRAPH_SPACINGS[paragraphSpacing].second,
+            pictures = showPictures,
+            fontIndex = fontIndex,
+            typeface = Fonts.typeface(this, fontIndex),
+            lineHeight = Pages.LINE_SPACINGS[lineSpacing].second,
+            justify = justify,
+            locale = bookLocale(),
+            // Picture pixels are CSS pixels: as large as on a phone screen, then fitted to the page.
+            pixelScale = resources.displayMetrics.density,
         )
-        val pictures = showPictures
-        val typeface = Fonts.typeface(this, fontIndex)
-        val lineHeight = Pages.LINE_SPACINGS[lineSpacing].second
-        val justified = justify
-        val locale = bookLocale()
-        // Picture pixels are CSS pixels: as large as on a phone screen, then fitted to the page.
-        val pixelScale = resources.displayMetrics.density
+        val ready = if (cached != null) null
+        else readyChapters.firstOrNull { it.book === b && it.chapter == target && it.layout == layout }
+        if (ready != null) {
+            val at = anchor?.let { findAnchor(ready.content.anchors, it) } ?: offset
+            chapterLaidOut(b, target, ready.content, ready.pages, layout, at)
+            return
+        }
+        if (cached == null && prefetching == target to layout) {
+            // Turned into the next chapter before it was ready: hurry it up, and show it when done.
+            awaitingPrefetch = AwaitedChapter(id, offset, anchor)
+            try { Process.setThreadPriority(prefetchThreadId, Process.THREAD_PRIORITY_DEFAULT) } catch (e: Exception) { }
+            return
+        }
         worker.execute {
             try {
                 val content = if (cached != null) HtmlText.Chapter(cached, cachedAnchors)
                 else HtmlText.toText(b.readChapter(target), b.spine[target])
-                val text = content.text
                 val at = anchor?.let { findAnchor(content.anchors, it) } ?: offset
-                val pictureSize: ((String) -> IntArray?)? = if (pictures) b::pictureSize else null
-                val result = Pages.paginate(
-                    text, w, h, textPx, spacing, pictureSize, pixelScale, typeface, lineHeight, justified, locale,
-                )
+                val result = layout.paginate(b, content.text)
                 mainHandler.post {
                     if (id != jobId) return@post
-                    chapterText = text
-                    chapterAnchors = content.anchors
-                    pages = result
-                    loading = false
-                    // While reading aloud, a re-layout (e.g. the bar appearing) keeps the spoken sentence in view.
-                    val spoken = spokenRange
-                    val showAt = if (speaking && !speakAfterLoad && spoken != null) spoken.first else at
-                    // [page] must belong to the new pages right away: showPage sets it only once the
-                    // page's pictures are decoded, and the code below (sync check, reading) uses it now.
-                    page = result.pageForOffset(showAt)
-                    showPage(page)
-                    if (speakAfterLoad) {
-                        speakAfterLoad = false
-                        if (speaking) speakFrom(result.offsetOf(page))
-                    }
-                    if (syncCheckPending) {
-                        syncCheckPending = false
-                        checkRemotePosition()
-                    }
+                    chapterLaidOut(b, target, content, result, layout, at)
                 }
-            } catch (e: Exception) {
+            } catch (e: Throwable) {
+                val message = logError("Laying out chapter ${target + 1} of ${b.title}", e, "Could not read chapter ${target + 1}.")
                 mainHandler.post {
                     if (id != jobId) return@post
                     loading = false
-                    pageView.showMessage("Could not read chapter ${target + 1}.\n${e.message ?: ""}")
+                    pageView.showMessage(message)
                 }
             }
         }
     }
+
+    /** Shows the page at offset [at] of a chapter just laid out (or laid out ahead). */
+    private fun chapterLaidOut(b: EpubBook, target: Int, content: HtmlText.Chapter, result: Pages, layout: TextLayout, at: Int) {
+        // The chapter being left stays ready, for paging back into it.
+        val left = pages
+        val leftText = chapterText
+        val leftLayout = pagesLayout
+        val leftChapter = shownChapter
+        if (left != null && leftText != null && leftLayout != null && leftChapter != target) {
+            readyChapters.add(ReadyChapter(b, leftChapter, HtmlText.Chapter(leftText, chapterAnchors), left, leftLayout))
+        }
+        chapterText = content.text
+        chapterAnchors = content.anchors
+        pages = result
+        pagesLayout = layout
+        shownChapter = target
+        loading = false
+        // Keep only the neighbors of this chapter, laid out the current way.
+        readyChapters.removeAll { it.book !== b || it.layout != layout || (it.chapter != target - 1 && it.chapter != target + 1) }
+        prefetch(b, target + 1, layout)
+        // While reading aloud, a re-layout (e.g. the bar appearing) keeps the spoken sentence in view.
+        val spoken = spokenRange
+        val showAt = if (speaking && !speakAfterLoad && spoken != null) spoken.first else at
+        // [page] must belong to the new pages right away: showPage sets it only once the
+        // page's pictures are decoded, and the code below (sync check, reading) uses it now.
+        page = result.pageForOffset(showAt)
+        showPage(page)
+        if (speakAfterLoad) {
+            speakAfterLoad = false
+            if (speaking) speakFrom(result.offsetOf(page))
+        }
+        if (syncCheckPending) {
+            syncCheckPending = false
+            checkRemotePosition()
+        }
+    }
+
+    /** Lays out chapter [index] in the background, unless it's ready already or doesn't exist. */
+    private fun prefetch(b: EpubBook, index: Int, layout: TextLayout) {
+        if (index >= b.spine.size || readyChapters.any { it.chapter == index }) return
+        val gen = ++prefetchGen
+        prefetching = index to layout
+        prefetchWorker.execute {
+            if (gen != prefetchGen) return@execute
+            Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND) // raised if a load waited for the last one
+            val ready = try {
+                val content = HtmlText.toText(b.readChapter(index), b.spine[index])
+                ReadyChapter(b, index, content, layout.paginate(b, content.text), layout)
+            } catch (e: Throwable) { // e.g. the book was closed meanwhile, or out of memory: load it when needed
+                null
+            }
+            mainHandler.post {
+                if (gen != prefetchGen || book !== b) return@post
+                prefetching = null
+                val awaited = awaitingPrefetch
+                awaitingPrefetch = null
+                if (awaited != null && awaited.jobId == jobId) {
+                    if (ready != null) {
+                        val at = awaited.anchor?.let { findAnchor(ready.content.anchors, it) } ?: awaited.offset
+                        chapterLaidOut(b, index, ready.content, ready.pages, layout, at)
+                    } else {
+                        loadChapter(index, awaited.offset, awaited.anchor) // the usual way, which shows any error
+                    }
+                } else if (ready != null && pagesLayout == layout && shownChapter == index - 1) {
+                    readyChapters.add(ready)
+                }
+            }
+        }
+    }
+
+    /** Everything a chapter's layout depends on: equal settings give equal pages. */
+    private data class TextLayout(
+        val width: Int, val height: Int, val textPx: Float, val paragraphSpacing: Float, val pictures: Boolean,
+        val fontIndex: Int, val typeface: Typeface, val lineHeight: Float, val justify: Boolean, val locale: Locale,
+        val pixelScale: Float,
+    ) {
+        /** Runs on a background thread. */
+        fun paginate(b: EpubBook, text: CharSequence) = Pages.paginate(
+            text, width, height, textPx, paragraphSpacing, if (pictures) b::pictureSize else null, pixelScale,
+            typeface, lineHeight, justify, locale,
+        )
+    }
+
+    private class ReadyChapter(
+        val book: EpubBook, val chapter: Int, val content: HtmlText.Chapter, val pages: Pages, val layout: TextLayout,
+    )
 
     /** Position to keep when re-paginating. While a chapter is loading, that's the load target. */
     private fun currentOffset(): Int {
@@ -2026,6 +2209,7 @@ class MainActivity : Activity() {
         private const val REQUEST_OPEN = 1
         private const val REQUEST_DICTIONARY = 2
         private const val REQUEST_FOLDER = 3
+        private const val REQUEST_LOG_ACCESS = 4
         /** How long the screen stays on after the last page turn. */
         private const val AWAKE_MS = 5 * 60 * 1000L
         private const val GOOGLE_TRANSLATE = "com.google.android.apps.translate"

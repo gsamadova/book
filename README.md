@@ -45,6 +45,8 @@ The **volume keys** turn pages too: down for next, up for previous. Page-turn bu
 
 The bottom line shows the book title, the page within the chapter, the chapter number, and how much of the whole book you've read. Long chapters count for more than short ones, so a cover page doesn't count as a whole chapter.
 
+While you read a chapter, Book prepares the next one in the background, so turning into it doesn't make you wait.
+
 While you read, the screen stays on, even if your phone normally turns it off sooner. After 5 minutes without turning a page, your usual screen timeout applies again.
 
 ## The menu
@@ -73,7 +75,7 @@ In a submenu, the **Back** button or gesture goes up one level, for example from
 - **Line spacing**: Tight, Normal, Relaxed or Loose.
 - **Paragraph spacing**: None, Small, Medium or Large.
 - **Margins**: Narrow, Medium or Wide.
-- **Justify: On / Off**: lines fill the full width, as in a printed book, and long words are hyphenated in the book's language. Pages take a little longer to lay out. Needs Android 8 or newer.
+- **Justify: On / Off**: lines fill the full width, as in a printed book, and long words are hyphenated in the book's language. Opening a chapter takes a little longer. Needs Android 8 or newer.
 - **Pictures: On / Off**: shows or hides the pictures in the book. Your place in the book stays the same either way.
 - **Picture colors: Gray / Original**: Gray suits black-and-white e-ink screens. Choose Original on a phone, tablet or color screen.
 
@@ -163,12 +165,18 @@ On your other devices, those books appear in the Library marked **↓**. Tap one
 
 ## Troubleshooting
 
-- **"Could not open this book"**: the file may be damaged or DRM-protected. Book can't open DRM-protected books.
+- **"Could not open this book"** or **"Adding this book failed"**: the file may be damaged or DRM-protected. Book can't open DRM-protected books. The message says which step failed.
 - **A tap opens the wrong thing**: links take priority over page turns. Tap a little away from underlined text.
 - **A book from another device isn't in the Library**: check that the sync app has finished syncing the folder.
 - **No dictionary popup**: add a dictionary first (see *Adding dictionaries*).
 - **Google Translate isn't offered**: install the Google Translate app.
 - **Read aloud is silent or uses the wrong voice**: download the book's language voice in the text-to-speech settings.
+
+### Error logs
+
+When something goes wrong, Book saves the details in a file, one per error, such as `local/book/logs/errors-2026-11-21_18-32-06-024.log` on your device's storage. The error message on screen says which file. Copy it to a computer over USB, or open it with a file manager, and send it along with your bug report.
+
+On first start, Book asks for access to your storage to save logs there. On Android 11 and newer, tap **Allow**, then turn on **Allow access to manage all files**. Without this access, logs are saved in `Android/data/com.guny90.reader/files/logs` instead. Only the newest 50 logs are kept.
 
 ---
 

@@ -43,6 +43,31 @@ class TextPositionsTest {
         }
     }
 
+    @SdkSuppress(minSdkVersion = 26)
+    @Test
+    fun tapAnywhereFindsTheNearestCharacter() {
+        val l = layout(true)
+        val start = l.getLineStart(0)
+        val end = visibleEnd(l, 0)
+        var x = -20f
+        while (x < 620f) {
+            val nearest = (start..end).minByOrNull { Math.abs(TextPositions.x(l, 0, it) - x) }!!
+            val found = TextPositions.offsetAt(l, 0, x)
+            assertEquals(Math.abs(TextPositions.x(l, 0, nearest) - x), Math.abs(TextPositions.x(l, 0, found) - x), 0.01f)
+            x += 3f
+        }
+    }
+
+    /** Older Android can't ask a layout whether it's justified: pages remember it themselves. */
+    @SdkSuppress(minSdkVersion = 26)
+    @Test
+    fun pagesKnowWhetherTheyAreJustified() {
+        val justified = Pages.paginate(text, 600, 400, 40f, 0f, justify = true)
+        val plain = Pages.paginate(text, 600, 400, 40f, 0f, justify = false)
+        assertTrue(TextPositions.isJustified(justified.layout))
+        assertTrue(!TextPositions.isJustified(plain.layout))
+    }
+
     @Test
     fun lastLineAndUnjustifiedTextAreUnchanged() {
         val j = layout(true)

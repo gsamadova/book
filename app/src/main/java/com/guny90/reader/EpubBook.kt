@@ -52,7 +52,11 @@ class EpubBook private constructor(
 
     private val pictureSizes = HashMap<String, IntArray?>()
 
-    /** Pixel size of a picture, read from its header only; null if missing or unreadable. */
+    /**
+     * Pixel size of a picture, read from its header only; null if missing or unreadable.
+     * Synchronized: the next chapter is laid out on another thread than the current one.
+     */
+    @Synchronized
     fun pictureSize(path: String): IntArray? = pictureSizes.getOrPut(path) {
         val entry = zip.getEntry(path) ?: return@getOrPut null
         val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
