@@ -59,6 +59,9 @@ class Sidebar(context: Context) : FrameLayout(context) {
 
     var isShowing = false
         private set
+    /** Changes on every [show] and [hide]: a result that arrives later can tell whether the user moved on. */
+    var generation = 0
+        private set
     private var back: (() -> Unit)? = null
     /** Called after [hide]. */
     var onHidden: (() -> Unit)? = null
@@ -72,6 +75,7 @@ class Sidebar(context: Context) : FrameLayout(context) {
 
     /** Shows [rows]. With [back], a "‹ [backLabel]" row comes first, and Back calls [back]. */
     fun show(rows: List<Row>, backLabel: String? = null, back: (() -> Unit)? = null, scrollTo: Int = -1) {
+        generation++
         this.back = back
         panel.setBackgroundColor(Ink.paper)
         border.setBackgroundColor(Ink.text)
@@ -93,6 +97,7 @@ class Sidebar(context: Context) : FrameLayout(context) {
 
     fun hide() {
         if (!isShowing) return
+        generation++
         isShowing = false
         visibility = View.GONE
         list.removeAllViews()

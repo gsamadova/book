@@ -214,6 +214,8 @@ class MainActivity : Activity() {
         sidebar.onHidden = ::updateSidebarBack
         sidebar.onShown = ::updateSidebarBack
         frame = FrameLayout(this).apply {
+            // Also behind the system bars (the insets padding): black there at night, as the page.
+            setBackgroundColor(Ink.paper)
             addView(root, MATCH_PARENT, MATCH_PARENT)
             addView(sidebar, MATCH_PARENT, MATCH_PARENT)
         }
@@ -329,13 +331,15 @@ class MainActivity : Activity() {
      */
     private fun showLibrary() {
         if (!sharedFolder.isEnabled) return showLibrary(emptyList(), null)
+        // Listing the folder can be slow: if the user has moved on by then, don't take over the screen.
+        val asked = sidebar.generation
         folderWorker.execute {
             val (shared, error) = try {
                 sharedFolder.books() to null
             } catch (e: Exception) {
                 emptyList<SharedFolder.Book>() to e
             }
-            mainHandler.post { if (!isFinishing) showLibrary(shared, error) }
+            mainHandler.post { if (!isFinishing && sidebar.generation == asked) showLibrary(shared, error) }
         }
     }
 
@@ -616,6 +620,7 @@ class MainActivity : Activity() {
 
     /** Saves the position of the open book (EPUB or PDF) and closes it. */
     private fun closeCurrentBook() {
+        sidebar.hide() // its rows belong to the book being closed
         stopReadingAloud()
         pushPosition() // the book being replaced
         backStack.clear()
@@ -1024,6 +1029,7 @@ class MainActivity : Activity() {
         prefs.edit().putBoolean("night", Ink.night).apply()
         PictureSpan.setColors(grayPictures, Ink.night && invertPdfAtNight)
         root.setBackgroundColor(Ink.paper)
+        frame.setBackgroundColor(Ink.paper)
         // The read-aloud bar's buttons take their colors when built.
         val visibility = controls.visibility
         val index = root.indexOfChild(controls)

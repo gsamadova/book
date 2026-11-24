@@ -102,6 +102,23 @@ class SidebarTest {
         assertEquals(Ink.NIGHT_TEXT, texts(s).first { it.text == "Night mode" }.currentTextColor)
     }
 
+    /** Async results (e.g. the library's shared folder) check this to tell whether the user moved on meanwhile. */
+    @Test fun generationChangesOnShowAndHide() = onMain {
+        val s = Sidebar(context)
+        val g0 = s.generation
+        s.show(listOf(Sidebar.Row.Item("Night mode", "On") {}))
+        val g1 = s.generation
+        assertTrue(g1 != g0)
+        s.show(listOf(Sidebar.Row.Item("Font", "Serif") {}), "Text", back = {})
+        val g2 = s.generation
+        assertTrue(g2 != g1)
+        s.hide()
+        assertTrue(s.generation != g2)
+        val g3 = s.generation
+        s.hide() // already hidden: nothing changes
+        assertEquals(g3, s.generation)
+    }
+
     @Test fun panelWidthIsCapped() = onMain {
         val cap = (360 * context.resources.displayMetrics.density).toInt()
         val s = Sidebar(context)
