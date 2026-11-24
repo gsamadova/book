@@ -14,12 +14,12 @@ Works on Android 7.0 and newer.
 
 ## Opening a book
 
-- On first start, tap the **middle of the screen**, then **Open book…**, and pick an `.epub` or `.pdf` file.
+- On first start, tap the **middle of the screen**, then **Library**, and pick an `.epub` or `.pdf` file.
 - Or open a book from your file manager with **Book**.
 
 ### Library
 
-**Menu → Open book…** shows your library: the last 10 books you opened on this device, most recent first. The book that is open now is marked with ▸.
+**Menu → Library** shows your library: the last 10 books you opened on this device, most recent first. The book that is open now is marked with ▸.
 
 - Each book shows how much of it you've read.
 - Tap a book to open it where you left off.
@@ -41,7 +41,7 @@ The screen is split into three columns:
 | middle | opens the menu |
 | right third | next page |
 
-To turn pages by tapping the top and bottom instead, choose **Menu → Tap to turn pages: Top · bottom**. Then the top third goes back, the bottom third goes forward, and the middle opens the menu. Tap the item again to switch back to left and right.
+To turn pages by tapping the top and bottom instead, choose **Menu → Page turns: Top · bottom**. Then the top third goes back, the bottom third goes forward, and the middle opens the menu. Tap the item again to switch back to left and right.
 
 The **volume keys** turn pages too: down for next, up for previous. Page-turn buttons and keyboard arrows also work.
 
@@ -53,28 +53,44 @@ While you read, the screen stays on, even if your phone normally turns it off so
 
 ## The menu
 
-Tap the middle of the screen. The items depend on the book:
+Tap the middle of the screen. The menu opens as a panel on the left, over the page:
 
-- **Back to where you were**: appears after you follow a link (see below).
-- **Contents**: the book's table of contents.
+```
+Beloved
+Ch. 4. The Clearing   ›
+37%
+
+Read aloud
+────────────
+Aa   −   28   +
+Text                  ›
+Night mode          Off
+Page turns   Left·right
+────────────
+Words                 ›
+Sync                  ›
+────────────
+Library
+```
+
+- **At the top:** the book's title, the chapter you're in (with its name from the book's contents), and how much of the book you've read. **Tap the chapter** to open the contents, with your chapter in bold, and tap an entry to go there.
 - **Read aloud**
-- **Text**: font, text size, spacing, margins, justified text, pictures.
+- **Aa − +**: makes the text smaller or larger, in steps of 2. The menu stays open, so you can tap again.
+- **Text**: font, spacing, margins, justified text, pictures.
+- **Night mode** and **Page turns** (Left · right or Top · bottom, see *Turning pages*) switch with one tap.
 - **Words**: what selecting words does, and your dictionaries.
 - **Sync**: reading position and book sync.
-- **Night mode**
-- **Tap to turn pages**: Left · right or Top · bottom (see *Turning pages*).
-- **Open book…**
+- **Library**: your books, and adding new ones.
 
-For PDFs: **Go to page…**, **Words**, **Colors**, and at night **Invert pages at night**.
+Items with **›** open a list in the same panel. Its first line, such as **‹ Menu**, takes you back up. The phone's **Back** button or gesture does the same, and closes the menu at the top. Tapping the page beside the menu closes it.
 
-In a submenu, the **Back** button or gesture goes up one level, for example from *Paragraph spacing* to *Text*, then to the main menu. Tapping outside a menu closes it.
+For PDFs, the top shows the page number instead: tap it to go to another page. Below are **Colors**, at night **Invert pages at night**, **Night mode**, **Page turns**, **Words**, **Sync** and **Library**.
 
 ## Text and pictures
 
-**Menu → Text**:
+To change the text size, use **Aa − +** in the menu. The rest is in **Menu → Text**:
 
 - **Font**: Serif, Literata (a font made for reading on screens), Sans-serif, Condensed (fits more words on a line) or Monospace.
-- **Larger text / Smaller text**: changes the size in steps of 2. The menu stays open, so you can tap again.
 - **Line spacing**: Tight, Normal, Relaxed or Loose.
 - **Paragraph spacing**: None, Small, Medium or Large.
 - **Margins**: Narrow, Medium or Wide.
@@ -93,7 +109,7 @@ PDF pages are inverted at night, which suits pages of text. For comics or pictur
 ## Links and footnotes
 
 - **Footnotes** (small numbers like `1` or `[1]`): tap one to read the note in a popup without leaving your page. **Go to note** takes you to where the note sits in the book.
-- **Links within the book** (for example the book's own contents page): tap to jump there. Press the phone's **Back** button, or use **Menu → Back to where you were**, to return.
+- **Links within the book** (for example the book's own contents page): tap to jump there. Press the phone's **Back** button to return.
 - **Web links**: Book asks before opening them in your browser.
 
 Tip: on a page that is all links, such as a contents page, tap a blank area or use the volume keys to turn the page.
@@ -137,7 +153,7 @@ If Book says a voice is missing, download it in your device's **text-to-speech s
 
 PDF pages are shown as they are printed, with white margins trimmed so the text is as large as possible.
 
-- **Menu → Go to page…** jumps to a page number.
+- **Menu**, then tap the page number at the top, to go to another page.
 - **Menu → Colors** switches between gray and original colors.
 
 Text size and reading aloud are not available for PDFs.

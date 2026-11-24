@@ -1233,7 +1233,6 @@ class MainActivity : Activity() {
     }
 
     private fun spacingName() = Pages.PARAGRAPH_SPACINGS[paragraphSpacing].first
-    private fun onOff(on: Boolean) = if (on) "on" else "off"
 
     /** A text layout choice saved under [key]; the chapter is laid out again, keeping the position. */
     private fun chooseLayoutOption(title: String, names: List<String>, selected: Int, key: String, apply: (Int) -> Unit) {
