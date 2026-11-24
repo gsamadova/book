@@ -1055,7 +1055,10 @@ class MainActivity : Activity() {
      * a page. After [AWAKE_MS] without turning a page, the usual timeout applies again.
      */
     private fun stayAwake() {
-        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        // Only when it's off: setting a window flag lays out the whole window again, on every page turn.
+        if (window.attributes.flags and WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON == 0) {
+            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
         mainHandler.removeCallbacks(allowScreenOff)
         mainHandler.postDelayed(allowScreenOff, AWAKE_MS)
     }

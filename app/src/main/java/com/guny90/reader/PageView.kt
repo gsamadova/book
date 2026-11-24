@@ -301,6 +301,9 @@ class PageView(context: Context) : View(context) {
     init {
         setBackgroundColor(Color.WHITE)
         isFocusable = true
+        // Page keys leave touch mode, and Android then fades in a highlight on the focused page:
+        // several frames, each an e-ink refresh, before the page turns.
+        if (Build.VERSION.SDK_INT >= 26) defaultFocusHighlightEnabled = false
     }
 
     val textWidth get() = width - paddingLeft - paddingRight - 2 * margin
