@@ -346,45 +346,40 @@ class MainActivity : Activity() {
         val entries = library.entries()
         val here = entries.map { it.fileName.substringBeforeLast('.') }.toSet()
         val onlyShared = shared.filter { it.hash !in here }
-        if (entries.isEmpty() && onlyShared.isEmpty()) return pickBook() // nothing to choose from yet
+        if (entries.isEmpty() && onlyShared.isEmpty()) { // nothing to choose from yet
+            sidebar.hide()
+            return pickBook()
+        }
         val open = currentFile?.name
-        val items = listOf("Add a new book…") +
-            entries.map { e ->
-                (if (e.fileName == open) "\u25B8 " else "") + e.title + (if (e.isPdf) " (PDF)" else "") +
-                    (savedPercent(e)?.let { " \u00B7 $it%" } ?: "")
-            } +
-            onlyShared.map { b -> "\u21E3 " + b.title + (if (b.isPdf) " (PDF)" else "") }
-        val dialog = showPlain(
-            dialog()
-                .setTitle("Library (long-press to remove)")
-                .setItems(items.toTypedArray()) { _, i ->
-                    when {
-                        i == 0 -> pickBook()
-                        i <= entries.size -> if (entries[i - 1].fileName != open) openFromLibrary(entries[i - 1])
-                        else -> openUri(onlyShared[i - 1 - entries.size].uri)
-                    }
-                },
-            ::showMenu,
-        )
-        dialog.listView.setOnItemLongClickListener { _, _, i, _ ->
-            when {
-                i == 0 -> return@setOnItemLongClickListener false
-                i <= entries.size -> {
-                    val entry = entries[i - 1]
-                    if (entry.fileName == open) {
+        val rows = ArrayList<Sidebar.Row>()
+        rows += Sidebar.Row.Item("Add a new book\u2026") { sidebar.hide(); pickBook() }
+        for (e in entries) {
+            val isOpen = e.fileName == open
+            rows += Sidebar.Row.Item(
+                e.title + if (e.isPdf) " (PDF)" else "", savedPercent(e)?.let { "$it%" }, marked = isOpen,
+                onLongPress = {
+                    if (isOpen) {
                         Toast.makeText(this, "This book is open. Open another book first, then remove it.", Toast.LENGTH_LONG).show()
                     } else {
-                        dialog.dismiss()
-                        confirmRemove(entry)
+                        sidebar.hide()
+                        confirmRemove(e)
                     }
-                }
-                else -> {
-                    dialog.dismiss()
-                    confirmDeleteShared(onlyShared[i - 1 - entries.size])
-                }
+                },
+            ) {
+                sidebar.hide()
+                if (!isOpen) openFromLibrary(e)
             }
-            true
         }
+        for (b in onlyShared) {
+            rows += Sidebar.Row.Item(
+                "\u21E3 " + b.title + if (b.isPdf) " (PDF)" else "",
+                onLongPress = { sidebar.hide(); confirmDeleteShared(b) },
+            ) {
+                sidebar.hide()
+                openUri(b.uri)
+            }
+        }
+        sidebar.show(rows, "Menu", ::showMenu)
     }
 
     private fun confirmDeleteShared(book: SharedFolder.Book) {
@@ -1050,7 +1045,7 @@ class MainActivity : Activity() {
     }
 
     private fun chooseFont() {
-        chooseOption("Font", Fonts.names, fontIndex, ::showTextMenu) { i ->
+        chooseOption("Font", Fonts.names, fontIndex, ::showTextMenu, "Text") { i ->
             if (i == fontIndex) return@chooseOption
             fontIndex = i
             prefs.edit().putInt("font", i).apply()
@@ -1165,7 +1160,7 @@ class MainActivity : Activity() {
                 rows += syncRow
             }
             else -> {
-                rows += Sidebar.Row.Item("Dictionaries", opens = true) { showDictionaries(::showMenu) }
+                rows += Sidebar.Row.Item("Dictionaries", opens = true) { showDictionaries(::showMenu, "Menu") }
                 rows += syncRow
                 rows += nightRow
                 rows += turnsRow
@@ -1192,45 +1187,49 @@ class MainActivity : Activity() {
         return Sidebar.Row.Header(b.title, ChapterLabel.label(chapter + 1, name), ::showContents, listOf("${percentShown()}%"))
     }
 
-    /** Text size, spacing and pictures. Stays open after a quick change, so you can tap again. */
+    /** Font, spacing, margins and pictures (the size is in the menu itself). */
     private fun showTextMenu() {
-        val actions = ArrayList<Pair<String, () -> Unit>>()
-        actions += "Larger text (${fontSp + 2})" to { changeFont(+2); showTextMenu() }
-        actions += "Smaller text (${fontSp - 2})" to { changeFont(-2); showTextMenu() }
-        actions += "Font: ${Fonts.names[fontIndex]}" to ::chooseFont
-        actions += "Line spacing: ${Pages.LINE_SPACINGS[lineSpacing].first}" to {
+        val rows = ArrayList<Sidebar.Row>()
+        rows += Sidebar.Row.Item("Font", Fonts.names[fontIndex]) { chooseFont() }
+        rows += Sidebar.Row.Item("Line spacing", Pages.LINE_SPACINGS[lineSpacing].first) {
             chooseLayoutOption("Line spacing", Pages.LINE_SPACINGS.map { it.first }, lineSpacing, "line_spacing") {
                 lineSpacing = it
             }
         }
-        actions += "Paragraph spacing: ${spacingName()}" to ::chooseParagraphSpacing
-        actions += "Margins: ${Pages.MARGINS[marginIndex].first}" to {
+        rows += Sidebar.Row.Item("Paragraph spacing", spacingName()) {
+            chooseLayoutOption("Paragraph spacing", Pages.PARAGRAPH_SPACINGS.map { it.first }, paragraphSpacing, "paragraph_spacing") {
+                paragraphSpacing = it
+            }
+        }
+        rows += Sidebar.Row.Item("Margins", Pages.MARGINS[marginIndex].first) {
             chooseLayoutOption("Margins", Pages.MARGINS.map { it.first }, marginIndex, "margin") {
                 marginIndex = it
                 pageView.margin = (Pages.MARGINS[it].second * resources.displayMetrics.density).toInt()
             }
         }
-        if (Build.VERSION.SDK_INT >= 26) actions += "Justify: ${if (justify) "On" else "Off"}" to {
+        if (Build.VERSION.SDK_INT >= 26) rows += Sidebar.Row.Item("Justify", if (justify) "On" else "Off") {
             justify = !justify
             prefs.edit().putBoolean("justify", justify).apply()
             loadChapter(chapter, currentOffset())
             showTextMenu()
         }
-        actions += "Pictures: ${if (showPictures) "On" else "Off"}" to { togglePictures(); showTextMenu() }
+        rows += Sidebar.Row.Item("Pictures", if (showPictures) "On" else "Off") { togglePictures(); showTextMenu() }
         if (showPictures) {
-            actions += "Picture colors: ${pictureColorsName()}" to { togglePictureColors(); showTextMenu() }
+            rows += Sidebar.Row.Item("Picture colors", pictureColorsName()) { togglePictureColors(); showTextMenu() }
         }
-        showList("Text", actions.map { it.first }, back = ::showMenu) { actions[it].second() }
+        sidebar.show(rows, "Menu", ::showMenu)
     }
 
     /** What selecting words does, and the dictionaries used for it. */
     private fun showWordsMenu() {
         val count = dictionaries.list().size
-        val actions = ArrayList<Pair<String, () -> Unit>>()
-        actions += "One word: ${oneWordAction.label}" to ::chooseOneWordAction
-        actions += "Several words: ${severalWordsAction.label}" to ::chooseSeveralWordsAction
-        actions += "Dictionaries (${if (count == 0) "none" else count})" to { showDictionaries(::showWordsMenu) }
-        showList("Words", actions.map { it.first }, back = ::showMenu) { actions[it].second() }
+        sidebar.show(listOf(
+            Sidebar.Row.Item("One word", oneWordAction.label) { chooseOneWordAction() },
+            Sidebar.Row.Item("Several words", severalWordsAction.label) { chooseSeveralWordsAction() },
+            Sidebar.Row.Item("Dictionaries", if (count == 0) "none" else "$count", opens = true) {
+                showDictionaries(::showWordsMenu, "Words")
+            },
+        ), "Menu", ::showMenu)
     }
 
     private fun spacingName() = Pages.PARAGRAPH_SPACINGS[paragraphSpacing].first
@@ -1238,7 +1237,7 @@ class MainActivity : Activity() {
 
     /** A text layout choice saved under [key]; the chapter is laid out again, keeping the position. */
     private fun chooseLayoutOption(title: String, names: List<String>, selected: Int, key: String, apply: (Int) -> Unit) {
-        chooseOption(title, names, selected, ::showTextMenu) { i ->
+        chooseOption(title, names, selected, ::showTextMenu, "Text") { i ->
             if (i == selected) return@chooseOption
             apply(i)
             prefs.edit().putInt(key, i).apply()
@@ -1246,62 +1245,58 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun chooseParagraphSpacing() {
-        val names = Pages.PARAGRAPH_SPACINGS.map { it.first }.toTypedArray()
-        showPlain(
-            dialog()
-                .setTitle("Paragraph spacing")
-                .setSingleChoiceItems(names, paragraphSpacing) { dialog, which ->
-                    dialog.dismiss()
-                    if (which != paragraphSpacing) {
-                        paragraphSpacing = which
-                        prefs.edit().putInt("paragraph_spacing", which).apply()
-                        loadChapter(chapter, currentOffset()) // same text, new layout: position is kept
-                    }
-                },
-            ::showTextMenu,
-        )
-    }
-
     private fun chooseOneWordAction() {
-        chooseOption("When one word is selected", OneWord.entries.map { it.label }, oneWordAction.ordinal, ::showWordsMenu) {
+        chooseOption("When one word is selected", OneWord.entries.map { it.label }, oneWordAction.ordinal, ::showWordsMenu, "Words") {
             oneWordAction = OneWord.entries[it]
             prefs.edit().putString("one_word_action", oneWordAction.name).apply()
         }
     }
 
     private fun chooseSeveralWordsAction() {
-        chooseOption("When several words are selected", SeveralWords.entries.map { it.label }, severalWordsAction.ordinal, ::showWordsMenu) {
+        chooseOption("When several words are selected", SeveralWords.entries.map { it.label }, severalWordsAction.ordinal, ::showWordsMenu, "Words") {
             severalWordsAction = SeveralWords.entries[it]
             prefs.edit().putString("several_words_action", severalWordsAction.name).apply()
         }
     }
 
-    private fun chooseOption(title: String, names: List<String>, selected: Int, back: () -> Unit, onPick: (Int) -> Unit) {
-        showPlain(
-            dialog()
-                .setTitle(title)
-                .setSingleChoiceItems(names.toTypedArray(), selected) { dialog, which ->
-                    dialog.dismiss()
-                    onPick(which)
-                },
-            back,
-        )
+    /** One of [names], [selected] marked; picking one runs [onPick], then goes [back] to its section ([backLabel]). */
+    private fun chooseOption(
+        title: String, names: List<String>, selected: Int, back: () -> Unit, backLabel: String, onPick: (Int) -> Unit,
+    ) {
+        val rows = ArrayList<Sidebar.Row>()
+        rows += Sidebar.Row.Header(title, null, null, emptyList())
+        names.forEachIndexed { i, name ->
+            rows += Sidebar.Row.Item(name, marked = i == selected) {
+                onPick(i)
+                back()
+            }
+        }
+        sidebar.show(rows, backLabel, back)
     }
 
+    /** The book's contents, the current chapter marked and in view; a tap goes there. */
     private fun showContents() {
         val b = book ?: return
         val entries = b.toc.ifEmpty {
             b.spine.indices.map { EpubBook.TocEntry("Chapter ${it + 1}", it) }
         }
-        showList("Contents", entries.map { it.title }, back = ::showMenu) {
-            val entry = entries[it]
-            val p = pages
-            val offset = entry.anchor?.let { a -> findAnchor(chapterAnchors, a) }
-            // Same chapter, already laid out: just turn to the page.
-            if (entry.spineIndex == chapter && p != null && !loading && offset != null) showPage(p.pageForOffset(offset))
-            else loadChapter(entry.spineIndex, 0, entry.anchor)
+        val p = pages
+        val start = if (p != null && page < p.count) p.offsetOf(page) else 0
+        val current = entries.indexOfLast { e ->
+            e.spineIndex < chapter ||
+                (e.spineIndex == chapter && (e.anchor == null || (findAnchor(chapterAnchors, e.anchor) ?: 0) <= start))
         }
+        val rows = entries.mapIndexed { i, entry ->
+            Sidebar.Row.Item(entry.title, marked = i == current) {
+                sidebar.hide()
+                val shown = pages
+                val offset = entry.anchor?.let { a -> findAnchor(chapterAnchors, a) }
+                // Same chapter, already laid out: just turn to the page.
+                if (entry.spineIndex == chapter && shown != null && !loading && offset != null) showPage(shown.pageForOffset(offset))
+                else loadChapter(entry.spineIndex, 0, entry.anchor)
+            }
+        }
+        sidebar.show(rows, "Menu", ::showMenu, scrollTo = current)
     }
 
     // ---------------------------------------------------------------- links
@@ -1535,27 +1530,21 @@ class MainActivity : Activity() {
 
     // ---------------------------------------------------------------- dictionaries
 
-    /** The dictionaries list; Back returns to [parent]. */
-    private fun showDictionaries(parent: () -> Unit) {
+    /** The dictionaries: tap one to remove it, or add more. Back returns to [parent] ([parentLabel]). */
+    private fun showDictionaries(parent: () -> Unit, parentLabel: String) {
         val dicts = dictionaries.list()
-        val builder = dialog()
-            .setTitle(if (dicts.isEmpty()) "Dictionaries" else "Dictionaries (tap to remove)")
-            .setPositiveButton("Add…") { _, _ -> pickDictionary() }
-            .setNegativeButton("Close", null)
-        if (dicts.isEmpty()) {
-            builder.setMessage(
-                "No dictionaries yet.\n\nTap Add… and select the StarDict files together " +
-                    "(.ifo, .idx and .dict or .dict.dz), or one .zip / .tar.gz archive."
-            )
-        } else {
-            builder.setItems(dicts.map { "${it.name}  (${it.words} words)" }.toTypedArray()) { _, i ->
-                confirmRemove(dicts[i], parent)
-            }
+        val rows = ArrayList<Sidebar.Row>()
+        if (dicts.isEmpty()) rows += Sidebar.Row.Note("No dictionaries yet")
+        for (dict in dicts) rows += Sidebar.Row.Item(dict.name, "${dict.words} words") {
+            sidebar.hide()
+            confirmRemove(dict, parent, parentLabel)
         }
-        showPlain(builder, parent)
+        rows += Sidebar.Row.Divider
+        rows += Sidebar.Row.Item("Add\u2026") { sidebar.hide(); pickDictionary() }
+        sidebar.show(rows, parentLabel, parent)
     }
 
-    private fun confirmRemove(dict: Dictionaries.Info, parent: () -> Unit) {
+    private fun confirmRemove(dict: Dictionaries.Info, parent: () -> Unit, parentLabel: String) {
         showPlain(
             dialog()
                 .setTitle("Remove dictionary?")
@@ -1563,11 +1552,11 @@ class MainActivity : Activity() {
                 .setPositiveButton("Remove") { _, _ ->
                     dictWorker.execute {
                         dictionaries.remove(dict.id)
-                        mainHandler.post { showDictionaries(parent) }
+                        mainHandler.post { showDictionaries(parent, parentLabel) }
                     }
                 }
                 .setNegativeButton("Cancel", null),
-        ) { showDictionaries(parent) }
+        ) { showDictionaries(parent, parentLabel) }
     }
 
     private fun pickDictionary() {
@@ -2094,10 +2083,16 @@ class MainActivity : Activity() {
     }
 
     private fun showSyncMenu() {
-        showList("Sync", listOf(
-            "Reading position: ${if (positionSync.isEnabled) positionSync.username else "Off"}",
-            "Books: ${if (sharedFolder.isEnabled) sharedFolder.displayName else "Off"}",
-        ), back = ::showMenu) { if (it == 0) showSyncSettings() else showFolderSettings() }
+        sidebar.show(listOf(
+            Sidebar.Row.Item("Reading position", if (positionSync.isEnabled) positionSync.username else "Off") {
+                sidebar.hide()
+                showSyncSettings()
+            },
+            Sidebar.Row.Item("Books", if (sharedFolder.isEnabled) sharedFolder.displayName else "Off") {
+                sidebar.hide()
+                showFolderSettings()
+            },
+        ), "Menu", ::showMenu)
     }
 
     private fun showFolderSettings() {
