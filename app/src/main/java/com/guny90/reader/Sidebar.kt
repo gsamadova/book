@@ -62,6 +62,8 @@ class Sidebar(context: Context) : FrameLayout(context) {
     private var back: (() -> Unit)? = null
     /** Called after [hide]. */
     var onHidden: (() -> Unit)? = null
+    /** Called when [show] makes it appear (not when it changes sections). */
+    var onShown: (() -> Unit)? = null
 
     init {
         visibility = View.GONE
@@ -83,7 +85,10 @@ class Sidebar(context: Context) : FrameLayout(context) {
             scroll.post { scroll.scrollTo(0, (target.top - scroll.height / 3).coerceAtLeast(0)) }
         }
         visibility = View.VISIBLE
-        isShowing = true
+        if (!isShowing) {
+            isShowing = true
+            onShown?.invoke()
+        }
     }
 
     fun hide() {

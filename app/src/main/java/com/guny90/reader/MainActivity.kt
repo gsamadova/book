@@ -32,6 +32,7 @@ import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
 import android.view.WindowManager
 import android.widget.EditText
+import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
@@ -139,6 +140,9 @@ class MainActivity : Activity() {
     private enum class SeveralWords(val label: String) { TRANSLATE("Google Translate"), COPY("Copy"), ASK("Ask") }
     private var loading = false
     private lateinit var root: LinearLayout
+    /** [root] with the [sidebar] menu over it. */
+    private lateinit var frame: FrameLayout
+    private lateinit var sidebar: Sidebar
     /** Index into [Fonts.names]. */
     private var fontIndex = 0
     /** In night mode, PDF pages are inverted (good for text, odd for pictures). */
@@ -206,9 +210,16 @@ class MainActivity : Activity() {
             addView(pageView, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
             addView(controls, MATCH_PARENT, WRAP_CONTENT)
         }
-        setContentView(root)
+        sidebar = Sidebar(this)
+        sidebar.onHidden = ::updateSidebarBack
+        sidebar.onShown = ::updateSidebarBack
+        frame = FrameLayout(this).apply {
+            addView(root, MATCH_PARENT, MATCH_PARENT)
+            addView(sidebar, MATCH_PARENT, MATCH_PARENT)
+        }
+        setContentView(frame)
         updateSystemBars()
-        ViewCompat.setOnApplyWindowInsetsListener(root) { v, insets ->
+        ViewCompat.setOnApplyWindowInsetsListener(frame) { v, insets ->
             val bars = insets.getInsets(
                 WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
             )
@@ -1067,7 +1078,7 @@ class MainActivity : Activity() {
     private fun dialog() =
         if (Ink.night) AlertDialog.Builder(this, R.style.Theme_Reader_Dialog_Night) else AlertDialog.Builder(this)
 
-    private fun turnZonesName() = if (pageView.turnUpDown) "Top · bottom" else "Left · right"
+    private fun turnZonesName() = if (pageView.turnUpDown) "Top \u00B7 bottom" else "Left \u00B7 right"
 
     private fun pictureColorsName() = if (grayPictures) "Gray" else "Original"
 
@@ -1108,48 +1119,77 @@ class MainActivity : Activity() {
     // ---------------------------------------------------------------- menu & keys
 
     /**
-     * Main menu, most used first: getting around the book, then settings grouped in submenus
-     * (each item shows its current values), then sync, then opening another book.
+     * The menu, in a sidebar: the header (title, chapter, progress), then reading, the page's
+     * look, setup, and the library, separated by lines.
      */
     private fun showMenu() {
         val b = book
         val d = pdf
-        val actions = ArrayList<Pair<String, () -> Unit>>()
+        val rows = ArrayList<Sidebar.Row>()
+        rows += menuHeader()
+        val nightRow = Sidebar.Row.Item("Night mode", if (Ink.night) "On" else "Off") { toggleNight(); showMenu() }
+        val turnsRow = Sidebar.Row.Item("Page turns", turnZonesName()) {
+            pageView.turnUpDown = !pageView.turnUpDown
+            prefs.edit().putBoolean("turn_up_down", pageView.turnUpDown).apply()
+            showMenu()
+        }
+        val wordsRow = Sidebar.Row.Item("Words", opens = true) { showWordsMenu() }
+        val syncRow = Sidebar.Row.Item("Sync", opens = true) { showSyncMenu() }
         when {
             d != null -> {
                 // Pages are pictures: no text settings or reading aloud, but words can be selected.
-                actions += "Go to page… (${pdfPage + 1} of ${d.pageCount})" to ::showGoToPage
-                actions += "Words: ${oneWordAction.label} · ${severalWordsAction.label}" to ::showWordsMenu
-                actions += "Colors: ${pictureColorsName()}" to { togglePictureColors(); showMenu() }
-                if (Ink.night) actions += "Invert pages at night: ${if (invertPdfAtNight) "On" else "Off"}" to {
+                rows += Sidebar.Row.Item("Colors", pictureColorsName()) { togglePictureColors(); showMenu() }
+                if (Ink.night) rows += Sidebar.Row.Item("Invert pages at night", if (invertPdfAtNight) "On" else "Off") {
                     invertPdfAtNight = !invertPdfAtNight
                     prefs.edit().putBoolean("night_invert_pdf", invertPdfAtNight).apply()
                     PictureSpan.setColors(grayPictures, Ink.night && invertPdfAtNight)
                     pageView.invalidate()
                     showMenu()
                 }
+                rows += nightRow
+                rows += turnsRow
+                rows += Sidebar.Row.Divider
+                rows += wordsRow
+                rows += syncRow
             }
             b != null -> {
-                backStack.lastOrNull()?.let { (ch, _) ->
-                    actions += "Back to where you were (ch ${ch + 1})" to ::goBack
-                }
-                actions += "Contents" to ::showContents
-                actions += if (readingAloud) "Stop reading aloud" to ::stopReadingAloud
-                else "Read aloud" to ::startReadingAloud
-                actions += "Text: ${Fonts.names[fontIndex]} $fontSp · ${spacingName()} spacing · pictures ${onOff(showPictures)}" to ::showTextMenu
-                actions += "Words: ${oneWordAction.label} · ${severalWordsAction.label}" to ::showWordsMenu
+                rows += if (readingAloud) Sidebar.Row.Item("Stop reading aloud") { sidebar.hide(); stopReadingAloud() }
+                else Sidebar.Row.Item("Read aloud") { sidebar.hide(); startReadingAloud() }
+                rows += Sidebar.Row.Divider
+                rows += Sidebar.Row.Stepper("Aa", "$fontSp", { changeFont(-2); showMenu() }, { changeFont(+2); showMenu() })
+                rows += Sidebar.Row.Item("Text", opens = true) { showTextMenu() }
+                rows += nightRow
+                rows += turnsRow
+                rows += Sidebar.Row.Divider
+                rows += wordsRow
+                rows += syncRow
             }
-            else -> actions += "Dictionaries" to { showDictionaries(::showMenu) }
+            else -> {
+                rows += Sidebar.Row.Item("Dictionaries", opens = true) { showDictionaries(::showMenu) }
+                rows += syncRow
+                rows += nightRow
+                rows += turnsRow
+            }
         }
-        actions += "Sync: positions ${onOff(positionSync.isEnabled)} · books ${onOff(sharedFolder.isEnabled)}" to ::showSyncMenu
-        actions += "Night mode: ${if (Ink.night) "On" else "Off"}" to { toggleNight(); showMenu() }
-        actions += "Tap to turn pages: ${turnZonesName()}" to {
-            pageView.turnUpDown = !pageView.turnUpDown
-            prefs.edit().putBoolean("turn_up_down", pageView.turnUpDown).apply()
-            showMenu()
+        rows += Sidebar.Row.Divider
+        rows += Sidebar.Row.Item("Library") { showLibrary() }
+        sidebar.show(rows)
+    }
+
+    /** Title, then where you are (tap: Contents, or Go to page for a PDF), then how much is read. */
+    private fun menuHeader(): Sidebar.Row.Header {
+        val d = pdf
+        if (d != null) {
+            return Sidebar.Row.Header(
+                d.title, "Page ${pdfPage + 1} of ${d.pageCount}", { sidebar.hide(); showGoToPage() },
+                listOf("${pdfPercent(pdfPage, d)}%"),
+            )
         }
-        actions += "Open book…" to ::showLibrary
-        showList(d?.title ?: b?.title ?: "Book", actions.map { it.first }) { actions[it].second() }
+        val b = book ?: return Sidebar.Row.Header("Book", null, null, emptyList())
+        val p = pages
+        val start = if (p != null && page < p.count) p.offsetOf(page) else 0
+        val name = ChapterLabel.currentName(b.toc, chapter, start) { findAnchor(chapterAnchors, it) }
+        return Sidebar.Row.Header(b.title, ChapterLabel.label(chapter + 1, name), ::showContents, listOf("${percentShown()}%"))
     }
 
     /** Text size, spacing and pictures. Stays open after a quick change, so you can tap again. */
@@ -1337,7 +1377,22 @@ class MainActivity : Activity() {
 
     @Deprecated("Used below Android 13 only; newer versions use updateBackHandler")
     override fun onBackPressed() {
+        if (sidebar.goBack()) return
         if (backStack.isNotEmpty()) goBack() else @Suppress("DEPRECATION") super.onBackPressed()
+    }
+
+    /** While the menu shows, the Back gesture goes up in it (before the links' Back). */
+    private val sidebarBackCallback: Any? by lazy {
+        if (Build.VERSION.SDK_INT >= 33) android.window.OnBackInvokedCallback { sidebar.goBack() } else null
+    }
+
+    private fun updateSidebarBack() {
+        if (Build.VERSION.SDK_INT < 33) return
+        val callback = sidebarBackCallback as android.window.OnBackInvokedCallback
+        onBackInvokedDispatcher.unregisterOnBackInvokedCallback(callback)
+        if (sidebar.isShowing) {
+            onBackInvokedDispatcher.registerOnBackInvokedCallback(android.window.OnBackInvokedDispatcher.PRIORITY_OVERLAY, callback)
+        }
     }
 
     /**
@@ -2201,6 +2256,14 @@ class MainActivity : Activity() {
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
         val volumeKey = keyCode == KeyEvent.KEYCODE_VOLUME_UP || keyCode == KeyEvent.KEYCODE_VOLUME_DOWN
         if (readingAloud && volumeKey) return super.onKeyDown(keyCode, event) // loudness while listening
+        if (sidebar.isShowing) {
+            when (keyCode) {
+                KeyEvent.KEYCODE_MENU, KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> sidebar.hide()
+                in PAGE_KEYS, KeyEvent.KEYCODE_VOLUME_DOWN, KeyEvent.KEYCODE_VOLUME_UP -> {}
+                else -> return super.onKeyDown(keyCode, event)
+            }
+            return true
+        }
         if (speaking && keyCode in PAGE_KEYS) {
             pauseReading()
             return true
