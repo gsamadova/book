@@ -196,6 +196,7 @@ class MainActivity : Activity() {
         removeOldPdfText()
 
         pageView = PageView(this)
+        pageView.turnUpDown = prefs.getBoolean("turn_up_down", false)
         pageView.margin = (Pages.MARGINS[marginIndex].second * resources.displayMetrics.density).toInt()
         controls = buildReadAloudBar()
         root = LinearLayout(this).apply {
@@ -1066,6 +1067,8 @@ class MainActivity : Activity() {
     private fun dialog() =
         if (Ink.night) AlertDialog.Builder(this, R.style.Theme_Reader_Dialog_Night) else AlertDialog.Builder(this)
 
+    private fun turnZonesName() = if (pageView.turnUpDown) "Top · bottom" else "Left · right"
+
     private fun pictureColorsName() = if (grayPictures) "Gray" else "Original"
 
     /** Long-press on a picture: show it full screen, at the screen's resolution. */
@@ -1140,6 +1143,11 @@ class MainActivity : Activity() {
         }
         actions += "Sync: positions ${onOff(positionSync.isEnabled)} · books ${onOff(sharedFolder.isEnabled)}" to ::showSyncMenu
         actions += "Night mode: ${if (Ink.night) "On" else "Off"}" to { toggleNight(); showMenu() }
+        actions += "Tap to turn pages: ${turnZonesName()}" to {
+            pageView.turnUpDown = !pageView.turnUpDown
+            prefs.edit().putBoolean("turn_up_down", pageView.turnUpDown).apply()
+            showMenu()
+        }
         actions += "Open book…" to ::showLibrary
         showList(d?.title ?: b?.title ?: "Book", actions.map { it.first }) { actions[it].second() }
     }

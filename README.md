@@ -41,6 +41,8 @@ The screen is split into three columns:
 | middle | opens the menu |
 | right third | next page |
 
+To turn pages by tapping the top and bottom instead, choose **Menu → Tap to turn pages: Top · bottom**. Then the top third goes back, the bottom third goes forward, and the middle opens the menu. Tap the item again to switch back to left and right.
+
 The **volume keys** turn pages too: down for next, up for previous. Page-turn buttons and keyboard arrows also work.
 
 The bottom line shows the book title, the page within the chapter, the chapter number, and how much of the whole book you've read. Long chapters count for more than short ones, so a cover page doesn't count as a whole chapter.
@@ -60,6 +62,7 @@ Tap the middle of the screen. The items depend on the book:
 - **Words**: what selecting words does, and your dictionaries.
 - **Sync**: reading position and book sync.
 - **Night mode**
+- **Tap to turn pages**: Left · right or Top · bottom (see *Turning pages*).
 - **Open book…**
 
 For PDFs: **Go to page…**, **Words**, **Colors**, and at night **Invert pages at night**.

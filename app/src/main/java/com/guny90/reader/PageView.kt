@@ -213,6 +213,8 @@ class PageView(context: Context) : View(context) {
     enum class Zone { PREV, MENU, NEXT }
 
     var onTap: ((Zone) -> Unit)? = null
+    /** Tap zones are rows (top: back, bottom: forward) instead of columns (left: back, right: forward). */
+    var turnUpDown = false
     /** Tap on a link (instead of [onTap]). */
     var onLinkTap: ((HtmlText.Link) -> Unit)? = null
     /**
@@ -585,9 +587,10 @@ class PageView(context: Context) : View(context) {
                         onLinkTap?.invoke(link)
                         return true
                     }
+                    val (pos, size) = if (turnUpDown) event.y to height else event.x to width
                     val zone = when {
-                        event.x < width / 3f -> Zone.PREV
-                        event.x > width * 2f / 3f -> Zone.NEXT
+                        pos < size / 3f -> Zone.PREV
+                        pos > size * 2f / 3f -> Zone.NEXT
                         else -> Zone.MENU
                     }
                     onTap?.invoke(zone)
