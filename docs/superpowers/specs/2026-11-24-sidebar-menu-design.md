@@ -99,3 +99,12 @@ should group items the way a reader thinks about them, and stay minimal and e-in
   current chapter.
 - **Implementation:** a plain View or overlay inside the activity, not a support-library drawer,
   which slides and dims. The existing pop-ups for input and confirmation stay.
+
+## Revisions after a design review (2026-11-25)
+
+- The header's chapter line is smaller than the rows (16 sp vs 18 sp) and carries the
+  percentage on its right: "The Clearing   37%  ›". For PDFs it's "Page N of M  ›" with no
+  percentage, which would repeat the page count.
+- Groups are separated by space, not rules: solid rules were the heaviest marks on e-ink.
+- The menu is set in Literata, the book font the app ships.
+- Page turns read "Sides" and "Top & bottom".

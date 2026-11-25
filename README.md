@@ -41,7 +41,7 @@ The screen is split into three columns:
 | middle | opens the menu |
 | right third | next page |
 
-To turn pages by tapping the top and bottom instead, choose **Menu → Page turns: Top · bottom**. Then the top third goes back, the bottom third goes forward, and the middle opens the menu. Tap the item again to switch back to left and right.
+To turn pages by tapping the top and bottom instead, choose **Menu → Page turns: Top & bottom**. Then the top third goes back, the bottom third goes forward, and the middle opens the menu. Tap the item again to switch back to left and right.
 
 The **volume keys** turn pages too: down for next, up for previous. Page-turn buttons and keyboard arrows also work.
 
@@ -57,27 +57,26 @@ Tap the middle of the screen. The menu opens as a panel on the left, over the pa
 
 ```
 Beloved
-The Clearing          ›
-37%
+The Clearing      37%  ›
 
 Read aloud
-────────────
+
 Aa   −   28   +
 Text                  ›
 Night mode          Off
-Page turns   Left·right
-────────────
+Page turns        Sides
+
 Words                 ›
 Sync                  ›
-────────────
+
 Library
 ```
 
-- **At the top:** the book's title, the name of the chapter you're in, from the book's contents, and how much of the book you've read. **Tap the chapter** to open the contents, with your chapter in bold, and tap an entry to go there.
+- **At the top:** the book's title, the name of the chapter you're in, from the book's contents, and how much of the book you've read. For a PDF, the page you're on. **Tap the chapter** to open the contents, with your chapter in bold, and tap an entry to go there.
 - **Read aloud**
 - **Aa − +**: makes the text smaller or larger, in steps of 2. The menu stays open, so you can tap again.
 - **Text**: font, spacing, margins, justified text, pictures.
-- **Night mode** and **Page turns** (Left · right or Top · bottom, see *Turning pages*) switch with one tap.
+- **Night mode** and **Page turns** (Sides or Top & bottom, see *Turning pages*) switch with one tap.
 - **Words**: what selecting words does, and your dictionaries.
 - **Sync**: reading position and book sync.
 - **Library**: your books, and adding new ones.

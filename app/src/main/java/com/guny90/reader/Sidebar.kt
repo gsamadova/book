@@ -23,10 +23,11 @@ import android.widget.TextView
 class Sidebar(context: Context) : FrameLayout(context) {
     sealed class Row {
         /**
-         * Title, then smaller lines. [link] is a tappable line under the title, shown with "›"
-         * (chapter → Contents, PDF page → Go to page); null for none.
+         * Title, then where you are: [link] is a tappable line under it, smaller than the rows,
+         * with [value] (e.g. "37%") and "›" on its right (chapter → Contents, PDF page → Go to
+         * page). Null [link] for a plain title.
          */
-        class Header(val title: String, val link: String?, val onLink: (() -> Unit)?, val lines: List<String>) : Row()
+        class Header(val title: String, val link: String?, val onLink: (() -> Unit)?, val value: String? = null) : Row()
         class Item(
             val label: String, val value: String? = null, val opens: Boolean = false,
             /** Shown bold: the current chapter, the open book, the chosen value. */
@@ -37,6 +38,7 @@ class Sidebar(context: Context) : FrameLayout(context) {
         class Stepper(val label: String, val value: String, val onMinus: () -> Unit, val onPlus: () -> Unit) : Row()
         /** A line of text that isn't tappable, e.g. "No dictionaries yet". */
         class Note(val text: String) : Row()
+        /** Space between groups: no rule, so the panel stays light on e-ink. */
         object Divider : Row()
     }
 
@@ -135,12 +137,7 @@ class Sidebar(context: Context) : FrameLayout(context) {
             isSingleLine = false
             maxLines = 3
         }
-        Row.Divider -> View(context).apply {
-            setBackgroundColor(Ink.text)
-            layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, dp(1).coerceAtLeast(1)).apply {
-                setMargins(dp(16), dp(8), dp(16), dp(8))
-            }
-        }
+        Row.Divider -> View(context).apply { layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, dp(20)) }
     }
 
     private fun header(row: Row.Header) = LinearLayout(context).apply {
@@ -151,12 +148,11 @@ class Sidebar(context: Context) : FrameLayout(context) {
             setPadding(dp(16), 0, dp(16), dp(4))
         })
         if (row.link != null) {
-            addView(item(Row.Item(row.link, opens = true) { row.onLink?.invoke() }, height = 40))
+            addView(item(Row.Item(row.link, row.value, opens = true) { row.onLink?.invoke() }, height = 40, sp = 16f))
         }
-        for (line in row.lines) addView(text(line, 15f).apply { setPadding(dp(16), dp(2), dp(16), dp(2)) })
     }
 
-    private fun item(row: Row.Item, height: Int = 48) = LinearLayout(context).apply {
+    private fun item(row: Row.Item, height: Int = 48, sp: Float = 18f) = LinearLayout(context).apply {
         orientation = LinearLayout.HORIZONTAL
         gravity = Gravity.CENTER_VERTICAL
         minimumHeight = dp(height)
@@ -164,7 +160,7 @@ class Sidebar(context: Context) : FrameLayout(context) {
         isClickable = true
         setOnClickListener { row.onTap() }
         row.onLongPress?.let { long -> setOnLongClickListener { long(); true } }
-        addView(text(row.label, 18f).apply {
+        addView(text(row.label, sp).apply {
             if (row.marked) setTypeface(typeface, Typeface.BOLD)
         }, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
         val value = listOfNotNull(row.value, if (row.opens) "›" else null).joinToString("  ")
@@ -193,7 +189,7 @@ class Sidebar(context: Context) : FrameLayout(context) {
         text = s
         setTextSize(TypedValue.COMPLEX_UNIT_SP, sp)
         setTextColor(Ink.text)
-        typeface = Typeface.SERIF
+        typeface = Fonts.typeface(context, 1) // Literata, the book font the app ships
         isSingleLine = true
         ellipsize = TextUtils.TruncateAt.END
     }

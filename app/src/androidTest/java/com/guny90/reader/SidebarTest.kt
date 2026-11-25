@@ -60,12 +60,37 @@ class SidebarTest {
     @Test fun headerLinkOpens() = onMain {
         var opened = false
         val s = Sidebar(context)
-        s.show(listOf(Sidebar.Row.Header("Beloved", "The Clearing", { opened = true }, listOf("37%"))))
+        s.show(listOf(Sidebar.Row.Header("Beloved", "The Clearing", { opened = true }, "37%")))
         s.size(1000, 1600)
         val shown = texts(s).map { it.text.toString() }
-        assertTrue(shown.toString(), shown.containsAll(listOf("The Clearing", "›", "37%")))
+        assertTrue(shown.toString(), shown.containsAll(listOf("Beloved", "The Clearing", "37%  ›")))
         clickText(s) { it.startsWith("The Clearing") }
         assertTrue(opened)
+    }
+
+    @Test fun headerLinkIsSmallerThanRows() = onMain {
+        val s = Sidebar(context)
+        s.show(listOf(Sidebar.Row.Header("Beloved", "The Clearing", {}, "37%"), Sidebar.Row.Item("Words") {}))
+        val all = texts(s)
+        val link = all.first { it.text == "The Clearing" }.textSize
+        val row = all.first { it.text == "Words" }.textSize
+        assertTrue("$link < $row", link < row)
+    }
+
+    @Test fun groupsAreSeparatedBySpaceNotRules() = onMain {
+        val s = Sidebar(context)
+        s.show(listOf(Sidebar.Row.Item("A") {}, Sidebar.Row.Divider, Sidebar.Row.Item("B") {}))
+        s.size(1000, 1600)
+        val list = ((s.panel.getChildAt(0) as android.view.ViewGroup).getChildAt(0)) as android.view.ViewGroup
+        val gap = list.getChildAt(1)
+        assertEquals(null, gap.background)
+        assertTrue(gap.height > 0)
+    }
+
+    @Test fun rowsUseLiterata() = onMain {
+        val s = Sidebar(context)
+        s.show(listOf(Sidebar.Row.Item("Words") {}))
+        assertEquals(Fonts.typeface(context, 1), texts(s).first { it.text == "Words" }.typeface)
     }
 
     @Test fun goBackCallsBackThenHides() = onMain {

@@ -1079,7 +1079,7 @@ class MainActivity : Activity() {
     private fun dialog() =
         if (Ink.night) AlertDialog.Builder(this, R.style.Theme_Reader_Dialog_Night) else AlertDialog.Builder(this)
 
-    private fun turnZonesName() = if (pageView.turnUpDown) "Top \u00B7 bottom" else "Left \u00B7 right"
+    private fun turnZonesName() = if (pageView.turnUpDown) "Top & bottom" else "Sides"
 
     private fun pictureColorsName() = if (grayPictures) "Gray" else "Original"
 
@@ -1177,20 +1177,19 @@ class MainActivity : Activity() {
         sidebar.show(rows)
     }
 
-    /** Title, then where you are (tap: Contents, or Go to page for a PDF), then how much is read. */
+    /** Title, then where you are and how much is read (tap: Contents, or Go to page for a PDF). */
     private fun menuHeader(): Sidebar.Row.Header {
         val d = pdf
         if (d != null) {
             return Sidebar.Row.Header(
                 d.title, "Page ${pdfPage + 1} of ${d.pageCount}", { sidebar.hide(); showGoToPage() },
-                listOf("${pdfPercent(pdfPage, d)}%"),
             )
         }
-        val b = book ?: return Sidebar.Row.Header("Book", null, null, emptyList())
+        val b = book ?: return Sidebar.Row.Header("Book", null, null)
         val p = pages
         val start = if (p != null && page < p.count) p.offsetOf(page) else 0
         val name = ChapterLabel.currentName(b.toc, chapter, start) { findAnchor(chapterAnchors, it) }
-        return Sidebar.Row.Header(b.title, ChapterLabel.label(chapter + 1, name), ::showContents, listOf("${percentShown()}%"))
+        return Sidebar.Row.Header(b.title, ChapterLabel.label(chapter + 1, name), ::showContents, "${percentShown()}%")
     }
 
     /** Font, spacing, margins and pictures (the size is in the menu itself). */
@@ -1269,7 +1268,7 @@ class MainActivity : Activity() {
         title: String, names: List<String>, selected: Int, back: () -> Unit, backLabel: String, onPick: (Int) -> Unit,
     ) {
         val rows = ArrayList<Sidebar.Row>()
-        rows += Sidebar.Row.Header(title, null, null, emptyList())
+        rows += Sidebar.Row.Header(title, null, null)
         names.forEachIndexed { i, name ->
             rows += Sidebar.Row.Item(name, marked = i == selected) {
                 onPick(i)
