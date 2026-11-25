@@ -57,7 +57,7 @@ Tap the middle of the screen. The menu opens as a panel on the left, over the pa
 
 ```
 Beloved
-Ch. 4. The Clearing   ›
+The Clearing          ›
 37%
 
 Read aloud
@@ -73,7 +73,7 @@ Sync                  ›
 Library
 ```
 
-- **At the top:** the book's title, the chapter you're in (with its name from the book's contents), and how much of the book you've read. **Tap the chapter** to open the contents, with your chapter in bold, and tap an entry to go there.
+- **At the top:** the book's title, the name of the chapter you're in, from the book's contents, and how much of the book you've read. **Tap the chapter** to open the contents, with your chapter in bold, and tap an entry to go there.
 - **Read aloud**
 - **Aa − +**: makes the text smaller or larger, in steps of 2. The menu stays open, so you can tap again.
 - **Text**: font, spacing, margins, justified text, pictures.

@@ -60,11 +60,11 @@ class SidebarTest {
     @Test fun headerLinkOpens() = onMain {
         var opened = false
         val s = Sidebar(context)
-        s.show(listOf(Sidebar.Row.Header("Beloved", "Ch. 4. X", { opened = true }, listOf("37%"))))
+        s.show(listOf(Sidebar.Row.Header("Beloved", "The Clearing", { opened = true }, listOf("37%"))))
         s.size(1000, 1600)
         val shown = texts(s).map { it.text.toString() }
-        assertTrue(shown.toString(), shown.containsAll(listOf("Ch. 4. X", "›", "37%")))
-        clickText(s) { it.startsWith("Ch. 4. X") }
+        assertTrue(shown.toString(), shown.containsAll(listOf("The Clearing", "›", "37%")))
+        clickText(s) { it.startsWith("The Clearing") }
         assertTrue(opened)
     }
 

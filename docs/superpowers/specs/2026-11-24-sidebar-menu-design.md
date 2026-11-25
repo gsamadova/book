@@ -37,7 +37,7 @@ should group items the way a reader thinks about them, and stay minimal and e-in
 ```
 ┌──────────────────────────┬─────────┐
 │ Beloved                  │         │
-│ Ch. 4. The Clearing   ›  │  page   │
+│ The Clearing          ›  │  page   │
 │ 37%                      │ (tap    │
 │                          │  here   │
 │ Read aloud               │  to     │
@@ -55,12 +55,12 @@ should group items the way a reader thinks about them, and stay minimal and e-in
 ```
 
 - **Header:** book title, then the chapter, then the percentage read.
-  - The chapter reads "Ch. N. <name>". N is the same chapter number as the status line
-    ("ch 4/22"), and the name comes from the book's table of contents.
+  - The chapter line is the chapter's name from the book's table of contents, e.g. "The
+    Clearing" or "Chapter 2", as the book writes it. (It was "Ch. N. <name>", but N counts the
+    book's files, cover and title page included, so it often disagreed with the name.)
   - The name is the last contents entry at or before the current page. Within a chapter, an
     entry's anchor must be at or before the page's first character.
-  - Without a name, or when the name is only the number again (e.g. "4", "Chapter 4", "IV"), it
-    reads "Ch. N".
+  - Without a name, it reads "Ch. N", the same number as the status line ("ch 4/22").
   - Long names are cut with "…" on one line.
   - Tapping the chapter line opens Contents, marked with "›". There is no separate Contents
     row. For PDFs the line is "Page N of M ›" and opens Go to page.
